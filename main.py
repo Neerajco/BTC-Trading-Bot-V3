@@ -3,6 +3,7 @@ import time
 import ccxt
 import pandas as pd
 from dotenv import load_dotenv
+from notifier import send_telegram
 
 # Import Our SMC Logic Engines
 from smc_logic import detect_fvg
@@ -91,6 +92,8 @@ def place_smc_order(symbol, side, amount, entry_price, sweep_price):
         })
         
         print("✅ SMC ORDER & RISK MANAGEMENT DEPLOYED SUCCESSFULLY!")
+        msg = f"🚨 SMART MONEY ENGAGED!\nSymbol: {symbol}\nSide: {side.upper()}\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}"
+        send_telegram(msg)
         return True
     except Exception as e:
         print(f"❌ Order Execution Failed: {e}")
