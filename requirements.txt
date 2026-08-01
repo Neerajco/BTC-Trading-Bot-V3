@@ -1,0 +1,6 @@
+ccxt>=4.5.6
+pandas
+pandas-ta
+numpy
+requests
+python-dotenv==1.0.1
