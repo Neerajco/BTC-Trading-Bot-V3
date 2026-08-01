@@ -1,5 +1,5 @@
-# Use the full Python image (Includes necessary C++ compilers for pandas/numpy)
-FROM python:3.10
+# Use Python 3.12 to match our local environment and pandas-ta requirements
+FROM python:3.12
 
 # Set the working directory
 WORKDIR /app
