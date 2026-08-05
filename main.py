@@ -10,7 +10,7 @@ from smc_logic import detect_fvg
 from mtf_scanner import get_latest_fvg
 from execution import detect_liquidity_sweep
 
-print("🚀 INITIATING SMC MASTER BOT V4 (OPTIMIZED 1:7 RR)...")
+print("🚀 INITIATING SMC MASTER BOT V4 (FAILSAFE EDITION)...")
 
 # --- 1. CONFIGURATION & CREDENTIALS ---
 load_dotenv()
@@ -20,7 +20,7 @@ SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 SYMBOL = 'BTC/USDT'
 HTF = '4h'
 LTF = '15m'
-RISK_PERCENT = 0.01  # 🎯 1.0% Risk per trade (Sweet Spot)
+RISK_PERCENT = 0.01  # 🎯 1.0% Risk per trade
 RR_RATIO = 7.0       # 🎯 1:7 Risk-to-Reward Ratio
 
 # --- 2. EXCHANGE SETUP ---
@@ -49,24 +49,20 @@ def get_market_data(symbol, timeframe, limit=100):
 
 
 def check_open_positions(symbol):
-    """Returns the current position amount for the given symbol."""
+    """Returns the current position amount. Returns None if API fails."""
     try:
         positions = exchange.fetch_positions([symbol])
         for pos in positions:
             if pos['symbol'] == symbol:
-                # CCXT unified property is 'contracts', not 'positionAmt'
                 return float(pos['contracts'])
         return 0.0
     except Exception as e:
-        print(f"⚠️ Position Check Error: {e}")
-        return 0.0
+        print(f"⚠️ API Error - Could not check position: {e}")
+        return None # 🛡️ FAILSAFE: Return None instead of 0.0 to prevent Amnesia Bug
 
 
 def place_smc_order(symbol, side, amount, entry_price, sweep_price):
-    """
-    Places a Market Order with 1:7 Risk-Reward (Master Baseline V4).
-    SL is placed strictly behind the Sweep Wick.
-    """
+    """Places a Market Order with 1:7 Risk-Reward."""
     try:
         # Calculate Strict SMC Stop Loss & Take Profit (1:7 RR)
         if side == 'buy':
@@ -114,6 +110,12 @@ def run_bot():
         try:
             # Step 1: Check if we are already in a trade
             pos_amt = check_open_positions(SYMBOL)
+
+            # 🛡️ FAILSAFE: Pause if API crashes
+            if pos_amt is None:
+                print("⏳ API Error: Could not verify positions. Skipping cycle to prevent duplicate orders.")
+                time.sleep(60)
+                continue
 
             if pos_amt != 0:
                 print(f"⏳ In Active Position ({pos_amt} {SYMBOL}). Waiting for SL or TP to hit...")
@@ -175,7 +177,7 @@ def run_bot():
 
                 if risk_per_coin > 0:
                     calculated_size = risk_amount / risk_per_coin
-                    # Safety cap for leverage limits
+                    # Safety cap for leverage limits (Max 19x leverage on demo)
                     max_size = (usdt_balance * 19) / current_price
                     trade_size = round(min(calculated_size, max_size), 3)
                 else:
