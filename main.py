@@ -51,14 +51,21 @@ def get_market_data(symbol, timeframe, limit=100):
 def check_open_positions(symbol):
     """Returns the current position amount. Returns None if API fails."""
     try:
-        positions = exchange.fetch_positions([symbol])
+        # FIX: Do not pass the symbol filter. Fetch all positions directly.
+        positions = exchange.fetch_positions()
+        
+        # Converts 'BTC/USDT' to 'BTCUSDT' to match Binance's raw data
+        raw_symbol = symbol.replace('/', '') 
+        
         for pos in positions:
-            if pos['symbol'] == symbol:
+            # Read directly from Binance's raw info to bypass CCXT's naming issues
+            if pos['info'].get('symbol') == raw_symbol:
                 return float(pos['contracts'])
+                
         return 0.0
     except Exception as e:
         print(f"⚠️ API Error - Could not check position: {e}")
-        return None # 🛡️ FAILSAFE: Return None instead of 0.0 to prevent Amnesia Bug
+        return None # 🛡️ FAILSAFE
 
 
 def place_smc_order(symbol, side, amount, entry_price, sweep_price):
