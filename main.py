@@ -10,7 +10,7 @@ from smc_logic import detect_fvg
 from mtf_scanner import get_latest_fvg
 from execution import detect_liquidity_sweep
 
-print("🚀 INITIATING SMC MASTER BOT V4.3 (NAKED POSITION GUARD & RE-ENTRY LOCK)...")
+print("🚀 INITIATING SMC MASTER BOT V4.8 (GEOMETRY FILTER & DYNAMIC RR)...")
 
 # --- 1. CONFIGURATION & CREDENTIALS ---
 load_dotenv()
@@ -21,7 +21,8 @@ SYMBOL = 'BTC/USDT'
 HTF = '4h'
 LTF = '15m'
 RISK_PERCENT = 0.01  # 🎯 1.0% Risk per trade
-RR_RATIO = 7.0       # 🎯 Strict 1:7 Risk-to-Reward Ratio
+MIN_RR = 2.0         # 🎯 Minimum allowed RR (Geometry Filter)
+MAX_RR = 7.0         # 🎯 Maximum allowed RR (Safety Cap)
 
 # --- 2. EXCHANGE SETUP ---
 exchange = ccxt.binance({
@@ -48,7 +49,7 @@ def get_market_data(symbol, timeframe, limit=100):
         return None
 
 def check_open_positions(symbol):
-    """Returns the current position amount. Returns None if API fails."""
+    """Returns the current position amount. Bypasses CCXT Symbol formatting bug."""
     try:
         positions = exchange.fetch_positions()
         raw_symbol = symbol.replace('/', '') 
@@ -58,24 +59,15 @@ def check_open_positions(symbol):
         return 0.0
     except Exception as e:
         print(f"⚠️ API Error - Could not check position: {e}")
-        return None 
+        return None # 🛡️ FAILSAFE
 
-def place_smc_order(symbol, side, amount, entry_price, sweep_price):
-    """Places a Market Order with 1:7 Risk-Reward & Naked Position Failsafe."""
+def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, applied_rr):
+    """Places a Market Order with Dynamic RR & Naked Position Failsafe."""
+    close_side = 'sell' if side == 'buy' else 'buy'
+    
+    print(f"⚙️ EXECUTING {side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP: {tp_price:.2f} | Size: {amount} BTC | RR: 1:{applied_rr:.2f}")
+
     try:
-        if side == 'buy':
-            sl_price = sweep_price - 10.0  
-            risk = entry_price - sl_price
-            tp_price = entry_price + (risk * RR_RATIO)  
-            close_side = 'sell'
-        else:
-            sl_price = sweep_price + 10.0  
-            risk = sl_price - entry_price
-            tp_price = entry_price - (risk * RR_RATIO)  
-            close_side = 'buy'
-
-        print(f"⚙️ EXECUTING {side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP: {tp_price} | Size: {amount} BTC")
-
         # 1. Open Position
         exchange.create_market_order(symbol, side, amount)
     except Exception as e:
@@ -83,22 +75,22 @@ def place_smc_order(symbol, side, amount, entry_price, sweep_price):
         return False
 
     try:
-        # 2. Place Strict Stop-Loss (Trigger by Last Price to prevent -2021 Mark Price error)
+        # 2. Place Strict Stop-Loss (workingType: CONTRACT_PRICE prevents -2021 Error)
         exchange.create_order(symbol, 'STOP_MARKET', close_side, amount, None, params={
             'stopPrice': float(sl_price),
             'reduceOnly': True,
             'workingType': 'CONTRACT_PRICE'
         })
 
-        # 3. Place Strict Take-Profit (Trigger by Last Price)
+        # 3. Place Dynamic Take-Profit 
         exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', close_side, amount, None, params={
             'stopPrice': float(tp_price),
             'reduceOnly': True,
             'workingType': 'CONTRACT_PRICE'
         })
 
-        print("✅ SMC ORDER & RISK MANAGEMENT DEPLOYED SUCCESSFULLY!")
-        msg = f"🚨 SMART MONEY ENGAGED (1:7 RR)!\nSymbol: {symbol}\nSide: {side.upper()}\nSize: {amount} BTC\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}"
+        print("✅ SMC ORDER & DYNAMIC RISK MANAGEMENT DEPLOYED SUCCESSFULLY!")
+        msg = f"🚨 SMART MONEY ENGAGED (1:{applied_rr:.2f} RR)!\nSymbol: {symbol}\nSide: {side.upper()}\nSize: {amount} BTC\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price:.2f}"
         send_telegram(msg)
         return True
 
@@ -117,7 +109,7 @@ def place_smc_order(symbol, side, amount, entry_price, sweep_price):
 # --- 4. THE MASTER LOOP ---
 def run_bot():
     print(f"\n📡 Scanning Market: {SYMBOL} | Waiting for Institutional Traps...")
-    last_executed_candle = None  # Tracks the candle we last traded on
+    last_executed_candle = None  # 🛡️ Tracks the candle we last traded on
 
     while True:
         try:
@@ -161,9 +153,9 @@ def run_bot():
 
             print(f"[{time.strftime('%H:%M:%S')}] Price: {current_price} | Zone: {fvg_top}-{fvg_bot} | Status: {trigger_msg}")
 
-            # 🛡️ THE RE-ENTRY LOCK: Prevent firing multiple times on the same candle if SL hits instantly
+            # 🛡️ THE RE-ENTRY LOCK: Prevent machine-gunning orders on a single volatile candle
             if is_trigger and current_candle_time == last_executed_candle:
-                print("⏳ Trap already traded in this 15m candle. Waiting for the next candle to prevent over-trading...")
+                print("⏳ Trap already traded in this 15m candle. Waiting for next candle to prevent over-trading...")
                 time.sleep(60)
                 continue
 
@@ -171,7 +163,7 @@ def run_bot():
                 sweep_price = float(trigger_msg.split('Swept ')[1].split(',')[0])
                 current_candle = ltf_df.iloc[-1]
                 
-                # --- THE GEOMETRIC FILTER (B * C) / A ---
+                # --- THE GEOMETRIC DYNAMIC RR ENGINE ---
                 lookback = 40
                 skip_trade = False
                 
@@ -180,7 +172,6 @@ def run_bot():
                         sl_price = sweep_price - 10.0
                         risk_per_coin = current_price - sl_price
                         if risk_per_coin <= 0: continue
-                        tp_price = current_price + (risk_per_coin * RR_RATIO)
 
                         c_price = current_candle['Low']
                         recent_chunk = ltf_df.iloc[-lookback:-1]
@@ -191,16 +182,12 @@ def run_bot():
                         a_price = origin_chunk['Low'].min()
                         
                         geo_target = (b_price * c_price) / a_price
-                        
-                        if geo_target < tp_price:
-                            print(f"🛡️ GEOMETRY FILTER: Target too low ({geo_target}). Skipping Trade to protect capital.")
-                            skip_trade = True
+                        raw_rr = (geo_target - current_price) / risk_per_coin
 
                     elif fvg_type == 'BEARISH':
                         sl_price = sweep_price + 10.0
                         risk_per_coin = sl_price - current_price
                         if risk_per_coin <= 0: continue
-                        tp_price = current_price - (risk_per_coin * RR_RATIO)
 
                         c_price = current_candle['High']
                         recent_chunk = ltf_df.iloc[-lookback:-1]
@@ -211,11 +198,13 @@ def run_bot():
                         a_price = origin_chunk['High'].max()
                         
                         geo_target = (b_price * c_price) / a_price
+                        raw_rr = (current_price - geo_target) / risk_per_coin
                         
-                        if geo_target > tp_price:
-                            print(f"🛡️ GEOMETRY FILTER: Target too high ({geo_target}). Skipping Trade to protect capital.")
-                            skip_trade = True
-                            
+                    # 🛡️ THE GEOMETRY FILTER
+                    if raw_rr < MIN_RR:
+                        print(f"🛡️ GEOMETRY FILTER: Weak momentum predicted (1:{raw_rr:.2f} RR). Skipping Trade.")
+                        skip_trade = True
+
                 except Exception as e:
                     print(f"⚠️ Geometry Math Error: {e}. Skipping to be safe.")
                     skip_trade = True
@@ -223,6 +212,15 @@ def run_bot():
                 if skip_trade:
                     time.sleep(60)
                     continue 
+
+                # 🛡️ THE CLAMP: Lock RR between MIN_RR and MAX_RR
+                applied_rr = min(raw_rr, MAX_RR)
+                
+                # Calculate exact Take Profit based on the clamped RR
+                if fvg_type == 'BULLISH':
+                    tp_price = current_price + (risk_per_coin * applied_rr)
+                else:
+                    tp_price = current_price - (risk_per_coin * applied_rr)
 
                 print("\n" + "=" * 50)
                 print("🚨 TRAP CONFIRMED & GEOMETRY ALIGNED! SMART MONEY ENGAGED! 🚨")
@@ -239,7 +237,7 @@ def run_bot():
 
                 if risk_per_coin > 0:
                     calculated_size = risk_amount / risk_per_coin
-                    max_size = (usdt_balance * 19) / current_price
+                    max_size = (usdt_balance * 19) / current_price # 19x leverage safety cap
                     trade_size = round(min(calculated_size, max_size), 3)
                 else:
                     trade_size = 0.01
@@ -251,7 +249,7 @@ def run_bot():
                 side = 'buy' if fvg_type == 'BULLISH' else 'sell'
                 
                 # Execute order
-                success = place_smc_order(SYMBOL, side, trade_size, current_price, sweep_price)
+                success = place_smc_order(SYMBOL, side, trade_size, current_price, sl_price, tp_price, applied_rr)
                 
                 # 🛡️ Lock the candle so we don't double-trade it!
                 if success:
