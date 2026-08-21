@@ -10,7 +10,7 @@ from smc_logic import detect_fvg
 from mtf_scanner import get_latest_fvg
 from execution import detect_liquidity_sweep
 
-print("🚀 INITIATING SMC MASTER BOT V4.8 (GEOMETRY FILTER & DYNAMIC RR)...")
+print("🚀 INITIATING SMC MASTER BOT V5.3 (DYNAMIC SL + AGGRESSIVE CLEANUP)...")
 
 # --- 1. CONFIGURATION & CREDENTIALS ---
 load_dotenv()
@@ -23,6 +23,7 @@ LTF = '15m'
 RISK_PERCENT = 0.01  # 🎯 1.0% Risk per trade
 MIN_RR = 2.0         # 🎯 Minimum allowed RR (Geometry Filter)
 MAX_RR = 7.0         # 🎯 Maximum allowed RR (Safety Cap)
+SL_BUFFER_PCT = 0.0015 # 🎯 0.15% Dynamic Stop-Loss Buffer (Prevents instant slippage wipeouts)
 
 # --- 2. EXCHANGE SETUP ---
 exchange = ccxt.binance({
@@ -36,7 +37,6 @@ exchange = ccxt.binance({
 })
 exchange.enable_demo_trading(True)  
 
-
 # --- 3. HELPER FUNCTIONS ---
 def get_market_data(symbol, timeframe, limit=100):
     try:
@@ -49,7 +49,6 @@ def get_market_data(symbol, timeframe, limit=100):
         return None
 
 def check_open_positions(symbol):
-    """Returns the current position amount. Bypasses CCXT Symbol formatting bug."""
     try:
         positions = exchange.fetch_positions()
         raw_symbol = symbol.replace('/', '') 
@@ -59,30 +58,62 @@ def check_open_positions(symbol):
         return 0.0
     except Exception as e:
         print(f"⚠️ API Error - Could not check position: {e}")
-        return None # 🛡️ FAILSAFE
+        return None 
+
+def aggressive_cleanup(symbol):
+    """Relentlessly attempts to cancel orphaned conditional orders until successful."""
+    retries = 0
+    while retries < 3:
+        try:
+            open_orders = exchange.fetch_open_orders(symbol)
+            if len(open_orders) == 0:
+                return True 
+            
+            exchange.cancel_all_orders(symbol)
+            print("🧹 SUCCESS: All orphaned SL/TP orders cleanly canceled.")
+            return True
+        except Exception as e:
+            print(f"⚠️ Cleanup failed, retrying in 5s... ({e})")
+            time.sleep(5)
+            retries += 1
+    return False
+
+def check_recent_exit(symbol):
+    """Checks recent trades to figure out if we hit SL or TP and sends alert."""
+    try:
+        trades = exchange.fetch_my_trades(symbol, limit=1)
+        if trades:
+            last_trade = trades[0]
+            realized_pnl = last_trade['info'].get('realizedPnl', '0')
+            price = last_trade['price']
+            
+            if float(realized_pnl) > 0:
+                msg = f"🏆 TRADE CLOSED IN PROFIT (TP HIT)!\nSymbol: {symbol}\nExit Price: {price}\nRealized PnL: +${float(realized_pnl):.2f}"
+            else:
+                msg = f"🛡️ TRADE CLOSED (STOP-LOSS HIT)\nSymbol: {symbol}\nExit Price: {price}\nRealized PnL: ${float(realized_pnl):.2f}"
+            
+            send_telegram(msg)
+            print(msg)
+    except Exception as e:
+        print(f"⚠️ Could not fetch exit history for Telegram alert: {e}")
 
 def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, applied_rr):
-    """Places a Market Order with Dynamic RR & Naked Position Failsafe."""
     close_side = 'sell' if side == 'buy' else 'buy'
-    
-    print(f"⚙️ EXECUTING {side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP: {tp_price:.2f} | Size: {amount} BTC | RR: 1:{applied_rr:.2f}")
+    print(f"⚙️ EXECUTING {side.upper()} | Entry: {entry_price} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | Size: {amount} BTC | RR: 1:{applied_rr:.2f}")
 
     try:
-        # 1. Open Position
         exchange.create_market_order(symbol, side, amount)
     except Exception as e:
         print(f"❌ Entry Order Execution Failed: {e}")
         return False
 
     try:
-        # 2. Place Strict Stop-Loss (workingType: CONTRACT_PRICE prevents -2021 Error)
         exchange.create_order(symbol, 'STOP_MARKET', close_side, amount, None, params={
             'stopPrice': float(sl_price),
             'reduceOnly': True,
             'workingType': 'CONTRACT_PRICE'
         })
 
-        # 3. Place Dynamic Take-Profit 
         exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', close_side, amount, None, params={
             'stopPrice': float(tp_price),
             'reduceOnly': True,
@@ -90,7 +121,7 @@ def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, appli
         })
 
         print("✅ SMC ORDER & DYNAMIC RISK MANAGEMENT DEPLOYED SUCCESSFULLY!")
-        msg = f"🚨 SMART MONEY ENGAGED (1:{applied_rr:.2f} RR)!\nSymbol: {symbol}\nSide: {side.upper()}\nSize: {amount} BTC\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price:.2f}"
+        msg = f"🚨 SMART MONEY ENGAGED (1:{applied_rr:.2f} RR)!\nSymbol: {symbol}\nSide: {side.upper()}\nSize: {amount} BTC\nEntry: {entry_price}\nSL: {sl_price:.2f}\nTP: {tp_price:.2f}"
         send_telegram(msg)
         return True
 
@@ -100,31 +131,38 @@ def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, appli
         try:
             exchange.create_market_order(symbol, close_side, amount, params={'reduceOnly': True})
             exchange.cancel_all_orders(symbol)
-            print("✅ Naked position safely closed.")
-        except Exception as abort_err:
-            print(f"🚨 CRITICAL ERROR: Could not close naked position! {abort_err}")
+        except Exception:
+            pass
         return False
 
 
 # --- 4. THE MASTER LOOP ---
 def run_bot():
     print(f"\n📡 Scanning Market: {SYMBOL} | Waiting for Institutional Traps...")
-    last_executed_candle = None  # 🛡️ Tracks the candle we last traded on
+    last_executed_candle = None  
+    was_in_position = False 
 
     while True:
         try:
             pos_amt = check_open_positions(SYMBOL)
 
             if pos_amt is None:
-                print("⏳ API Error: Could not verify positions. Skipping cycle to prevent duplicate orders.")
+                print("⏳ API Error: Could not verify positions. Skipping cycle.")
                 time.sleep(60)
                 continue
 
             if pos_amt != 0:
                 print(f"⏳ In Active Position ({pos_amt} {SYMBOL}). Waiting for SL or TP to hit...")
+                was_in_position = True
                 time.sleep(60)
                 continue
             else:
+                if was_in_position:
+                    aggressive_cleanup(SYMBOL)
+                    check_recent_exit(SYMBOL)
+                    was_in_position = False
+                
+                # Passive cleanup
                 try:
                     exchange.cancel_all_orders(SYMBOL)
                 except Exception:
@@ -153,23 +191,21 @@ def run_bot():
 
             print(f"[{time.strftime('%H:%M:%S')}] Price: {current_price} | Zone: {fvg_top}-{fvg_bot} | Status: {trigger_msg}")
 
-            # 🛡️ THE RE-ENTRY LOCK: Prevent machine-gunning orders on a single volatile candle
             if is_trigger and current_candle_time == last_executed_candle:
-                print("⏳ Trap already traded in this 15m candle. Waiting for next candle to prevent over-trading...")
+                print("⏳ Trap already traded in this 15m candle. Waiting for next candle...")
                 time.sleep(60)
                 continue
 
             if is_trigger:
                 sweep_price = float(trigger_msg.split('Swept ')[1].split(',')[0])
                 current_candle = ltf_df.iloc[-1]
-                
-                # --- THE GEOMETRIC DYNAMIC RR ENGINE ---
                 lookback = 40
                 skip_trade = False
                 
                 try:
                     if fvg_type == 'BULLISH':
-                        sl_price = sweep_price - 10.0
+                        # 🎯 DYNAMIC VOLATILITY STOP LOSS (0.15% below sweep)
+                        sl_price = sweep_price - (current_price * SL_BUFFER_PCT)
                         risk_per_coin = current_price - sl_price
                         if risk_per_coin <= 0: continue
 
@@ -185,7 +221,8 @@ def run_bot():
                         raw_rr = (geo_target - current_price) / risk_per_coin
 
                     elif fvg_type == 'BEARISH':
-                        sl_price = sweep_price + 10.0
+                        # 🎯 DYNAMIC VOLATILITY STOP LOSS (0.15% above sweep)
+                        sl_price = sweep_price + (current_price * SL_BUFFER_PCT)
                         risk_per_coin = sl_price - current_price
                         if risk_per_coin <= 0: continue
 
@@ -200,7 +237,6 @@ def run_bot():
                         geo_target = (b_price * c_price) / a_price
                         raw_rr = (current_price - geo_target) / risk_per_coin
                         
-                    # 🛡️ THE GEOMETRY FILTER
                     if raw_rr < MIN_RR:
                         print(f"🛡️ GEOMETRY FILTER: Weak momentum predicted (1:{raw_rr:.2f} RR). Skipping Trade.")
                         skip_trade = True
@@ -213,10 +249,8 @@ def run_bot():
                     time.sleep(60)
                     continue 
 
-                # 🛡️ THE CLAMP: Lock RR between MIN_RR and MAX_RR
                 applied_rr = min(raw_rr, MAX_RR)
                 
-                # Calculate exact Take Profit based on the clamped RR
                 if fvg_type == 'BULLISH':
                     tp_price = current_price + (risk_per_coin * applied_rr)
                 else:
@@ -225,7 +259,6 @@ def run_bot():
                 print("\n" + "=" * 50)
                 print("🚨 TRAP CONFIRMED & GEOMETRY ALIGNED! SMART MONEY ENGAGED! 🚨")
 
-                # --- DYNAMIC RISK SIZING (1.0% RISK) ---
                 try:
                     balance_data = exchange.fetch_balance()
                     usdt_balance = float(balance_data['total']['USDT'])
@@ -237,23 +270,21 @@ def run_bot():
 
                 if risk_per_coin > 0:
                     calculated_size = risk_amount / risk_per_coin
-                    max_size = (usdt_balance * 19) / current_price # 19x leverage safety cap
+                    max_size = (usdt_balance * 19) / current_price 
                     trade_size = round(min(calculated_size, max_size), 3)
                 else:
                     trade_size = 0.01
 
                 if trade_size < 0.001:
                     trade_size = 0.001  
-                # ---------------------------------------
 
                 side = 'buy' if fvg_type == 'BULLISH' else 'sell'
                 
-                # Execute order
                 success = place_smc_order(SYMBOL, side, trade_size, current_price, sl_price, tp_price, applied_rr)
                 
-                # 🛡️ Lock the candle so we don't double-trade it!
                 if success:
                     last_executed_candle = current_candle_time
+                    was_in_position = True 
 
                 print("=" * 50 + "\n")
 
