@@ -10,7 +10,7 @@ from smc_logic import detect_fvg
 from mtf_scanner import get_latest_fvg
 from execution import detect_liquidity_sweep
 
-print("🚀 INITIATING SMC MASTER BOT V5.3 (DYNAMIC SL + AGGRESSIVE CLEANUP)...")
+print("🚀 INITIATING SMC MASTER BOT V5.4 (ZONE LOCKOUT & BULLETPROOF CLEANUP)...")
 
 # --- 1. CONFIGURATION & CREDENTIALS ---
 load_dotenv()
@@ -20,10 +20,10 @@ SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 SYMBOL = 'BTC/USDT'
 HTF = '4h'
 LTF = '15m'
-RISK_PERCENT = 0.01  # 🎯 1.0% Risk per trade
-MIN_RR = 2.0         # 🎯 Minimum allowed RR (Geometry Filter)
-MAX_RR = 7.0         # 🎯 Maximum allowed RR (Safety Cap)
-SL_BUFFER_PCT = 0.0015 # 🎯 0.15% Dynamic Stop-Loss Buffer (Prevents instant slippage wipeouts)
+RISK_PERCENT = 0.01    # 🎯 1.0% Risk per trade
+MIN_RR = 2.0           # 🎯 Minimum allowed RR
+MAX_RR = 7.0           # 🎯 Maximum allowed RR
+SL_BUFFER_PCT = 0.004  # 🎯 0.40% Dynamic SL Buffer (~$300 breathing room to survive chop)
 
 # --- 2. EXCHANGE SETUP ---
 exchange = ccxt.binance({
@@ -60,17 +60,26 @@ def check_open_positions(symbol):
         print(f"⚠️ API Error - Could not check position: {e}")
         return None 
 
-def aggressive_cleanup(symbol):
-    """Relentlessly attempts to cancel orphaned conditional orders until successful."""
+def bulletproof_cleanup(symbol):
+    """Relentlessly cancels ALL orders, overriding Binance's conditional order visibility quirk."""
     retries = 0
     while retries < 3:
         try:
-            open_orders = exchange.fetch_open_orders(symbol)
-            if len(open_orders) == 0:
-                return True 
+            # 🚨 THE FIX: Binance hides conditional orders from standard fetch calls.
+            normal_orders = exchange.fetch_open_orders(symbol)
+            stop_orders = exchange.fetch_open_orders(symbol, params={'stop': True})
+            all_orders = normal_orders + stop_orders
             
+            if len(all_orders) == 0:
+                return True 
+                
+            for order in all_orders:
+                exchange.cancel_order(order['id'], symbol)
+                print(f"🧹 Force canceled hidden order: {order['id']}")
+            
+            # Nuclear backup
             exchange.cancel_all_orders(symbol)
-            print("🧹 SUCCESS: All orphaned SL/TP orders cleanly canceled.")
+            print("🧹 SUCCESS: Order book is 100% wiped clean.")
             return True
         except Exception as e:
             print(f"⚠️ Cleanup failed, retrying in 5s... ({e})")
@@ -79,7 +88,6 @@ def aggressive_cleanup(symbol):
     return False
 
 def check_recent_exit(symbol):
-    """Checks recent trades to figure out if we hit SL or TP and sends alert."""
     try:
         trades = exchange.fetch_my_trades(symbol, limit=1)
         if trades:
@@ -130,17 +138,17 @@ def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, appli
         print("🛡️ EMERGENCY FAILSAFE: Closing naked position to protect capital!")
         try:
             exchange.create_market_order(symbol, close_side, amount, params={'reduceOnly': True})
-            exchange.cancel_all_orders(symbol)
+            bulletproof_cleanup(symbol)
         except Exception:
             pass
         return False
-
 
 # --- 4. THE MASTER LOOP ---
 def run_bot():
     print(f"\n📡 Scanning Market: {SYMBOL} | Waiting for Institutional Traps...")
     last_executed_candle = None  
     was_in_position = False 
+    blacklisted_zone = None  # 🛡️ THE FIX: Stop duplicating trades on the same choppy FVG
 
     while True:
         try:
@@ -158,7 +166,7 @@ def run_bot():
                 continue
             else:
                 if was_in_position:
-                    aggressive_cleanup(SYMBOL)
+                    bulletproof_cleanup(SYMBOL)
                     check_recent_exit(SYMBOL)
                     was_in_position = False
                 
@@ -186,17 +194,24 @@ def run_bot():
             current_price = ltf_df['Close'].iloc[-1]
             current_candle_time = ltf_df['Timestamp'].iloc[-1]
             fvg_top, fvg_bot, fvg_type = active_fvg['top'], active_fvg['bot'], active_fvg['type']
+            current_fvg_id = f"{fvg_top}-{fvg_bot}"
 
             is_trigger, trigger_msg = detect_liquidity_sweep(ltf_df, fvg_top, fvg_bot, fvg_type)
 
-            print(f"[{time.strftime('%H:%M:%S')}] Price: {current_price} | Zone: {fvg_top}-{fvg_bot} | Status: {trigger_msg}")
-
-            if is_trigger and current_candle_time == last_executed_candle:
-                print("⏳ Trap already traded in this 15m candle. Waiting for next candle...")
-                time.sleep(60)
-                continue
+            print(f"[{time.strftime('%H:%M:%S')}] Price: {current_price} | Zone: {current_fvg_id} | Status: {trigger_msg}")
 
             if is_trigger:
+                # 🛡️ ZONE LOCKOUT: If we already traded this exact FVG, do not revenge trade it!
+                if current_fvg_id == blacklisted_zone:
+                    print("🚫 SETUP LOCKOUT: We already traded this FVG zone. Waiting for a fresh setup to avoid chop.")
+                    time.sleep(60)
+                    continue
+
+                if current_candle_time == last_executed_candle:
+                    print("⏳ Trap already traded in this 15m candle. Waiting for next candle...")
+                    time.sleep(60)
+                    continue
+
                 sweep_price = float(trigger_msg.split('Swept ')[1].split(',')[0])
                 current_candle = ltf_df.iloc[-1]
                 lookback = 40
@@ -204,7 +219,6 @@ def run_bot():
                 
                 try:
                     if fvg_type == 'BULLISH':
-                        # 🎯 DYNAMIC VOLATILITY STOP LOSS (0.15% below sweep)
                         sl_price = sweep_price - (current_price * SL_BUFFER_PCT)
                         risk_per_coin = current_price - sl_price
                         if risk_per_coin <= 0: continue
@@ -221,7 +235,6 @@ def run_bot():
                         raw_rr = (geo_target - current_price) / risk_per_coin
 
                     elif fvg_type == 'BEARISH':
-                        # 🎯 DYNAMIC VOLATILITY STOP LOSS (0.15% above sweep)
                         sl_price = sweep_price + (current_price * SL_BUFFER_PCT)
                         risk_per_coin = sl_price - current_price
                         if risk_per_coin <= 0: continue
@@ -285,6 +298,7 @@ def run_bot():
                 if success:
                     last_executed_candle = current_candle_time
                     was_in_position = True 
+                    blacklisted_zone = current_fvg_id # 🚨 Never trade this specific FVG again!
 
                 print("=" * 50 + "\n")
 
