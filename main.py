@@ -21,7 +21,13 @@ exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'future'}
 })
-exchange.set_sandbox_mode(True) # Demo Trading Enabled
+
+# 🛑 YEH PURANI LINE DELETE KAR DEIN:
+# exchange.set_sandbox_mode(True) 
+
+# ✅ YEH NAYI LINES ADD KAREIN (Force CCXT to new Demo Network):
+exchange.urls['api']['fapiPublic'] = 'https://demo-fapi.binance.com/fapi/v1'
+exchange.urls['api']['fapiPrivate'] = 'https://demo-fapi.binance.com/fapi/v1'
 
 def cleanup_ghost_orders():
     """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
