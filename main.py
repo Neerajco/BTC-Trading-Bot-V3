@@ -19,15 +19,14 @@ exchange = ccxt.binance({
     'apiKey': os.environ.get('BINANCE_API_KEY'),
     'secret': os.environ.get('BINANCE_SECRET_KEY'),
     'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
+    'options': {
+        'defaultType': 'future',
+        'adjustForTimeDifference': True,
+    }
 })
 
-# 🛑 YEH PURANI LINE DELETE KAR DEIN:
-# exchange.set_sandbox_mode(True) 
-
-# ✅ YEH NAYI LINES ADD KAREIN (Force CCXT to new Demo Network):
-exchange.urls['api']['fapiPublic'] = 'https://demo-fapi.binance.com/fapi/v1'
-exchange.urls['api']['fapiPrivate'] = 'https://demo-fapi.binance.com/fapi/v1'
+# ✅ THE EXACT FIX FROM V5.4
+exchange.enable_demo_trading(True)
 
 def cleanup_ghost_orders():
     """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
