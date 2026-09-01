@@ -1,312 +1,141 @@
-import os
-import time
 import ccxt
+import time
+import os
 import pandas as pd
-from dotenv import load_dotenv
-from notifier import send_telegram
+from notifier import send_telegram  # Assuming you have your telegram module
 
-# Import Our SMC Logic Engines
-from smc_logic import detect_fvg
-from mtf_scanner import get_latest_fvg
-from execution import detect_liquidity_sweep
+# --- 1. CONFIGURATION & V7.2 MATH ---
+SYMBOL = 'BTCUSDT'
+TIMEFRAME = '15m'
+RISK_PERCENT = 0.01
 
-print("🚀 INITIATING SMC MASTER BOT V5.4 (ZONE LOCKOUT & BULLETPROOF CLEANUP)...")
-
-# --- 1. CONFIGURATION & CREDENTIALS ---
-load_dotenv()
-API_KEY = os.environ.get('BINANCE_API_KEY')
-SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
-
-SYMBOL = 'BTC/USDT'
-HTF = '4h'
-LTF = '15m'
-RISK_PERCENT = 0.01    # 🎯 1.0% Risk per trade
-MIN_RR = 2.0           # 🎯 Minimum allowed RR
-MAX_RR = 7.0           # 🎯 Maximum allowed RR
-SL_BUFFER_PCT = 0.004  # 🎯 0.40% Dynamic SL Buffer (~$300 breathing room to survive chop)
+# 🎯 HARMONIC V7.2 PARAMETERS
+DIVISOR = 1.2          # 83.3% Deep Pullback
+SL_MULTIPLIER = 0.91   # 91.0% Breathing Room
+LOOKBACK = 40          # Candles to find the impulse wave
 
 # --- 2. EXCHANGE SETUP ---
 exchange = ccxt.binance({
-    'apiKey': API_KEY,
-    'secret': SECRET_KEY,
+    'apiKey': os.environ.get('BINANCE_API_KEY'),
+    'secret': os.environ.get('BINANCE_SECRET_KEY'),
     'enableRateLimit': True,
-    'options': {
-        'defaultType': 'future',
-        'adjustForTimeDifference': True,
-    }
+    'options': {'defaultType': 'future'}
 })
-exchange.enable_demo_trading(True)  
+exchange.set_sandbox_mode(True) # Demo Trading Enabled
 
-# --- 3. HELPER FUNCTIONS ---
-def get_market_data(symbol, timeframe, limit=100):
+def cleanup_ghost_orders():
+    """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
     try:
-        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df[['Open', 'High', 'Low', 'Close', 'Volume']] = df[['Open', 'High', 'Low', 'Close', 'Volume']].apply(pd.to_numeric)
-        return df
+        positions = exchange.fetch_positions([SYMBOL])
+        pos_data = [p for p in positions if p['symbol'] == SYMBOL][0]
+        pos_amt = float(pos_data['info']['positionAmt'])
+        
+        if pos_amt == 0.0:
+            open_orders = exchange.fetch_open_orders(SYMBOL)
+            if len(open_orders) > 0:
+                print(f"🧹 Trade Closed! Clearing {len(open_orders)} Ghost Orders...")
+                exchange.cancel_all_orders(SYMBOL)
+                # send_telegram(f"🧹 Cleaned up {len(open_orders)} Ghost Orders.")
     except Exception as e:
-        print(f"❌ API Fetch Error: {e}")
-        return None
+        print(f"⚠️ Cleanup Error: {e}")
 
-def check_open_positions(symbol):
-    try:
-        positions = exchange.fetch_positions()
-        raw_symbol = symbol.replace('/', '') 
-        for pos in positions:
-            if pos['info'].get('symbol') == raw_symbol:
-                return float(pos['contracts'])
-        return 0.0
-    except Exception as e:
-        print(f"⚠️ API Error - Could not check position: {e}")
-        return None 
-
-def bulletproof_cleanup(symbol):
-    """Relentlessly cancels ALL orders, overriding Binance's conditional order visibility quirk."""
-    retries = 0
-    while retries < 3:
-        try:
-            # 🚨 THE FIX: Binance hides conditional orders from standard fetch calls.
-            normal_orders = exchange.fetch_open_orders(symbol)
-            stop_orders = exchange.fetch_open_orders(symbol, params={'stop': True})
-            all_orders = normal_orders + stop_orders
-            
-            if len(all_orders) == 0:
-                return True 
-                
-            for order in all_orders:
-                exchange.cancel_order(order['id'], symbol)
-                print(f"🧹 Force canceled hidden order: {order['id']}")
-            
-            # Nuclear backup
-            exchange.cancel_all_orders(symbol)
-            print("🧹 SUCCESS: Order book is 100% wiped clean.")
-            return True
-        except Exception as e:
-            print(f"⚠️ Cleanup failed, retrying in 5s... ({e})")
-            time.sleep(5)
-            retries += 1
-    return False
-
-def check_recent_exit(symbol):
-    try:
-        trades = exchange.fetch_my_trades(symbol, limit=1)
-        if trades:
-            last_trade = trades[0]
-            realized_pnl = last_trade['info'].get('realizedPnl', '0')
-            price = last_trade['price']
-            
-            if float(realized_pnl) > 0:
-                msg = f"🏆 TRADE CLOSED IN PROFIT (TP HIT)!\nSymbol: {symbol}\nExit Price: {price}\nRealized PnL: +${float(realized_pnl):.2f}"
-            else:
-                msg = f"🛡️ TRADE CLOSED (STOP-LOSS HIT)\nSymbol: {symbol}\nExit Price: {price}\nRealized PnL: ${float(realized_pnl):.2f}"
-            
-            send_telegram(msg)
-            print(msg)
-    except Exception as e:
-        print(f"⚠️ Could not fetch exit history for Telegram alert: {e}")
-
-def place_smc_order(symbol, side, amount, entry_price, sl_price, tp_price, applied_rr):
-    close_side = 'sell' if side == 'buy' else 'buy'
-    print(f"⚙️ EXECUTING {side.upper()} | Entry: {entry_price} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | Size: {amount} BTC | RR: 1:{applied_rr:.2f}")
-
-    try:
-        exchange.create_market_order(symbol, side, amount)
-    except Exception as e:
-        print(f"❌ Entry Order Execution Failed: {e}")
-        return False
-
-    try:
-        exchange.create_order(symbol, 'STOP_MARKET', close_side, amount, None, params={
-            'stopPrice': float(sl_price),
-            'reduceOnly': True,
-            'workingType': 'CONTRACT_PRICE'
-        })
-
-        exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', close_side, amount, None, params={
-            'stopPrice': float(tp_price),
-            'reduceOnly': True,
-            'workingType': 'CONTRACT_PRICE'
-        })
-
-        print("✅ SMC ORDER & DYNAMIC RISK MANAGEMENT DEPLOYED SUCCESSFULLY!")
-        msg = f"🚨 SMART MONEY ENGAGED (1:{applied_rr:.2f} RR)!\nSymbol: {symbol}\nSide: {side.upper()}\nSize: {amount} BTC\nEntry: {entry_price}\nSL: {sl_price:.2f}\nTP: {tp_price:.2f}"
-        send_telegram(msg)
-        return True
-
-    except Exception as e:
-        print(f"❌ SL/TP Order Failed: {e}")
-        print("🛡️ EMERGENCY FAILSAFE: Closing naked position to protect capital!")
-        try:
-            exchange.create_market_order(symbol, close_side, amount, params={'reduceOnly': True})
-            bulletproof_cleanup(symbol)
-        except Exception:
-            pass
-        return False
-
-# --- 4. THE MASTER LOOP ---
-def run_bot():
-    print(f"\n📡 Scanning Market: {SYMBOL} | Waiting for Institutional Traps...")
-    last_executed_candle = None  
-    was_in_position = False 
-    blacklisted_zone = None  # 🛡️ THE FIX: Stop duplicating trades on the same choppy FVG
-
+def run_harmonic_v7():
+    print(f"🚀 HARMONIC V7.2 ENGINE STARTED | Divisor: {DIVISOR} | SL: {SL_MULTIPLIER}")
+    
     while True:
         try:
-            pos_amt = check_open_positions(SYMBOL)
+            # 1. CLEANUP GHOST ORDERS FIRST
+            cleanup_ghost_orders()
 
-            if pos_amt is None:
-                print("⏳ API Error: Could not verify positions. Skipping cycle.")
-                time.sleep(60)
+            # Check active position
+            positions = exchange.fetch_positions([SYMBOL])
+            pos_data = [p for p in positions if p['symbol'] == SYMBOL][0]
+            pos_amt = float(pos_data['info']['positionAmt'])
+
+            if pos_amt != 0.0:
+                print(f"⏳ Active Trade Running (Size: {pos_amt}). Waiting...")
+                time.sleep(30)
                 continue
 
-            if pos_amt != 0:
-                print(f"⏳ In Active Position ({pos_amt} {SYMBOL}). Waiting for SL or TP to hit...")
-                was_in_position = True
-                time.sleep(60)
-                continue
-            else:
-                if was_in_position:
-                    bulletproof_cleanup(SYMBOL)
-                    check_recent_exit(SYMBOL)
-                    was_in_position = False
-                
-                # Passive cleanup
-                try:
-                    exchange.cancel_all_orders(SYMBOL)
-                except Exception:
-                    pass
+            # 2. FETCH DATA & FIND IMPULSE
+            bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
+            df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            
+            window = df.iloc[-LOOKBACK-1:-1] # Ignore currently open candle
+            current_candle = df.iloc[-1]
+            
+            swing_low = window['Low'].min()
+            swing_high = window['High'].max()
+            swing_low_idx = window['Low'].idxmin()
+            swing_high_idx = window['High'].idxmax()
+            price_range = swing_high - swing_low
 
-            htf_df = get_market_data(SYMBOL, HTF, limit=100)
-            ltf_df = get_market_data(SYMBOL, LTF, limit=100) 
-
-            if htf_df is None or ltf_df is None:
-                time.sleep(10)
+            if price_range < 150: # Ignore flat chop
+                time.sleep(30)
                 continue
 
-            htf_fvg_df = detect_fvg(htf_df)
-            active_fvg = get_latest_fvg(htf_fvg_df)
+            # 3. HARMONIC MATH & EXECUTION
+            balance_data = exchange.fetch_balance()
+            usdt_balance = float(balance_data['USDT']['free'])
+            risk_amount = usdt_balance * RISK_PERCENT
 
-            if not active_fvg:
-                print(f"[{time.strftime('%H:%M:%S')}] 📉 No HTF Institutional FVG found. Resting...")
-                time.sleep(60)
-                continue
+            # --- BULLISH SETUP ---
+            if swing_low_idx < swing_high_idx: 
+                sniper_discount = price_range / DIVISOR
+                entry_level = swing_high - sniper_discount
 
-            current_price = ltf_df['Close'].iloc[-1]
-            current_candle_time = ltf_df['Timestamp'].iloc[-1]
-            fvg_top, fvg_bot, fvg_type = active_fvg['top'], active_fvg['bot'], active_fvg['type']
-            current_fvg_id = f"{fvg_top}-{fvg_bot}"
+                # If price drops into the 83.3% Harmonic Zone
+                if current_candle['Low'] <= entry_level and current_candle['Close'] > entry_level:
+                    sl_level = swing_high - (price_range * SL_MULTIPLIER)
+                    risk_per_coin = entry_level - sl_level
+                    
+                    if risk_per_coin > 0:
+                        geo_target = (swing_high * entry_level) / swing_low
+                        trade_size = round(risk_amount / risk_per_coin, 3)
 
-            is_trigger, trigger_msg = detect_liquidity_sweep(ltf_df, fvg_top, fvg_bot, fvg_type)
-
-            print(f"[{time.strftime('%H:%M:%S')}] Price: {current_price} | Zone: {current_fvg_id} | Status: {trigger_msg}")
-
-            if is_trigger:
-                # 🛡️ ZONE LOCKOUT: If we already traded this exact FVG, do not revenge trade it!
-                if current_fvg_id == blacklisted_zone:
-                    print("🚫 SETUP LOCKOUT: We already traded this FVG zone. Waiting for a fresh setup to avoid chop.")
-                    time.sleep(60)
-                    continue
-
-                if current_candle_time == last_executed_candle:
-                    print("⏳ Trap already traded in this 15m candle. Waiting for next candle...")
-                    time.sleep(60)
-                    continue
-
-                sweep_price = float(trigger_msg.split('Swept ')[1].split(',')[0])
-                current_candle = ltf_df.iloc[-1]
-                lookback = 40
-                skip_trade = False
-                
-                try:
-                    if fvg_type == 'BULLISH':
-                        sl_price = sweep_price - (current_price * SL_BUFFER_PCT)
-                        risk_per_coin = current_price - sl_price
-                        if risk_per_coin <= 0: continue
-
-                        c_price = current_candle['Low']
-                        recent_chunk = ltf_df.iloc[-lookback:-1]
-                        b_price = recent_chunk['High'].max()
-                        b_idx = recent_chunk['High'].idxmax()
-                        b_pos = ltf_df.index.get_loc(b_idx)
-                        origin_chunk = ltf_df.iloc[max(0, b_pos - lookback):b_pos]
-                        a_price = origin_chunk['Low'].min()
+                        print(f"🟢 BULLISH V7.2 TRIGGERED! Entry: {entry_level} | Target: {geo_target}")
                         
-                        geo_target = (b_price * c_price) / a_price
-                        raw_rr = (geo_target - current_price) / risk_per_coin
-
-                    elif fvg_type == 'BEARISH':
-                        sl_price = sweep_price + (current_price * SL_BUFFER_PCT)
-                        risk_per_coin = sl_price - current_price
-                        if risk_per_coin <= 0: continue
-
-                        c_price = current_candle['High']
-                        recent_chunk = ltf_df.iloc[-lookback:-1]
-                        b_price = recent_chunk['Low'].min()
-                        b_idx = recent_chunk['Low'].idxmin()
-                        b_pos = ltf_df.index.get_loc(b_idx)
-                        origin_chunk = ltf_df.iloc[max(0, b_pos - lookback):b_pos]
-                        a_price = origin_chunk['High'].max()
+                        # Execute Market Order
+                        exchange.create_market_buy_order(SYMBOL, trade_size)
                         
-                        geo_target = (b_price * c_price) / a_price
-                        raw_rr = (current_price - geo_target) / risk_per_coin
+                        # Place Conditional SL & TP
+                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, params={'stopPrice': sl_level})
+                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, params={'stopPrice': geo_target})
                         
-                    if raw_rr < MIN_RR:
-                        print(f"🛡️ GEOMETRY FILTER: Weak momentum predicted (1:{raw_rr:.2f} RR). Skipping Trade.")
-                        skip_trade = True
+                        send_telegram(f"🚀 V7.2 LONG Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
+                        time.sleep(60)
 
-                except Exception as e:
-                    print(f"⚠️ Geometry Math Error: {e}. Skipping to be safe.")
-                    skip_trade = True
+            # --- BEARISH SETUP ---
+            elif swing_high_idx < swing_low_idx:  
+                sniper_discount = price_range / DIVISOR
+                entry_level = swing_low + sniper_discount
 
-                if skip_trade:
-                    time.sleep(60)
-                    continue 
+                # If price pumps into the 83.3% Harmonic Zone
+                if current_candle['High'] >= entry_level and current_candle['Close'] < entry_level:
+                    sl_level = swing_low + (price_range * SL_MULTIPLIER)
+                    risk_per_coin = sl_level - entry_level
+                    
+                    if risk_per_coin > 0:
+                        geo_target = (swing_low * entry_level) / swing_high
+                        trade_size = round(risk_amount / risk_per_coin, 3)
 
-                applied_rr = min(raw_rr, MAX_RR)
-                
-                if fvg_type == 'BULLISH':
-                    tp_price = current_price + (risk_per_coin * applied_rr)
-                else:
-                    tp_price = current_price - (risk_per_coin * applied_rr)
+                        print(f"🔴 BEARISH V7.2 TRIGGERED! Entry: {entry_level} | Target: {geo_target}")
+                        
+                        # Execute Market Order
+                        exchange.create_market_sell_order(SYMBOL, trade_size)
+                        
+                        # Place Conditional SL & TP
+                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, params={'stopPrice': sl_level})
+                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, params={'stopPrice': geo_target})
+                        
+                        send_telegram(f"📉 V7.2 SHORT Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
+                        time.sleep(60)
 
-                print("\n" + "=" * 50)
-                print("🚨 TRAP CONFIRMED & GEOMETRY ALIGNED! SMART MONEY ENGAGED! 🚨")
-
-                try:
-                    balance_data = exchange.fetch_balance()
-                    usdt_balance = float(balance_data['total']['USDT'])
-                except Exception as e:
-                    print(f"⚠️ Could not fetch balance, defaulting to safety limit: {e}")
-                    usdt_balance = 1000.0
-
-                risk_amount = usdt_balance * RISK_PERCENT  
-
-                if risk_per_coin > 0:
-                    calculated_size = risk_amount / risk_per_coin
-                    max_size = (usdt_balance * 19) / current_price 
-                    trade_size = round(min(calculated_size, max_size), 3)
-                else:
-                    trade_size = 0.01
-
-                if trade_size < 0.001:
-                    trade_size = 0.001  
-
-                side = 'buy' if fvg_type == 'BULLISH' else 'sell'
-                
-                success = place_smc_order(SYMBOL, side, trade_size, current_price, sl_price, tp_price, applied_rr)
-                
-                if success:
-                    last_executed_candle = current_candle_time
-                    was_in_position = True 
-                    blacklisted_zone = current_fvg_id # 🚨 Never trade this specific FVG again!
-
-                print("=" * 50 + "\n")
-
-            time.sleep(60)
+            time.sleep(30) # Loop delay
 
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
-            time.sleep(60)
+            time.sleep(10)
 
-if __name__ == "__main__":
-    run_bot()
+if __name__ == '__main__':
+    run_harmonic_v7()
