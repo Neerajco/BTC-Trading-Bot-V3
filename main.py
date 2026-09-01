@@ -31,16 +31,21 @@ exchange.enable_demo_trading(True)
 def cleanup_ghost_orders():
     """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
     try:
-        positions = exchange.fetch_positions([SYMBOL])
-        pos_data = [p for p in positions if p['symbol'] == SYMBOL][0]
-        pos_amt = float(pos_data['info']['positionAmt'])
+        positions = exchange.fetch_positions()
+        pos_amt = 0.0
+        
+        # Safe extraction logic
+        raw_symbol = SYMBOL.replace('/', '').replace(':', '') 
+        for p in positions:
+            if p['info'].get('symbol') == raw_symbol or p.get('symbol') == SYMBOL:
+                pos_amt = float(p['info'].get('positionAmt', 0))
+                break
         
         if pos_amt == 0.0:
             open_orders = exchange.fetch_open_orders(SYMBOL)
             if len(open_orders) > 0:
                 print(f"🧹 Trade Closed! Clearing {len(open_orders)} Ghost Orders...")
                 exchange.cancel_all_orders(SYMBOL)
-                # send_telegram(f"🧹 Cleaned up {len(open_orders)} Ghost Orders.")
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
 
@@ -52,10 +57,15 @@ def run_harmonic_v7():
             # 1. CLEANUP GHOST ORDERS FIRST
             cleanup_ghost_orders()
 
-            # Check active position
-            positions = exchange.fetch_positions([SYMBOL])
-            pos_data = [p for p in positions if p['symbol'] == SYMBOL][0]
-            pos_amt = float(pos_data['info']['positionAmt'])
+            # Check active position safely
+            positions = exchange.fetch_positions()
+            pos_amt = 0.0
+            
+            raw_symbol = SYMBOL.replace('/', '').replace(':', '')
+            for p in positions:
+                if p['info'].get('symbol') == raw_symbol or p.get('symbol') == SYMBOL:
+                    pos_amt = float(p['info'].get('positionAmt', 0))
+                    break
 
             if pos_amt != 0.0:
                 print(f"⏳ Active Trade Running (Size: {pos_amt}). Waiting...")
