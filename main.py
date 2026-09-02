@@ -49,8 +49,28 @@ def cleanup_ghost_orders():
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
 
+def check_recent_pnl():
+    """Fetches the last trade from Binance and prints the Realized PNL."""
+    try:
+        trades = exchange.fetch_my_trades(SYMBOL, limit=2)
+        if trades:
+            last_trade = trades[-1]
+            price = last_trade['price']
+            realized_pnl = float(last_trade['info'].get('realizedPnl', '0'))
+            
+            if realized_pnl > 0:
+                print(f"🏆 PNL REPORT: TRADE CLOSED IN PROFIT! Exit Price: {price} | Profit: +${realized_pnl:.2f}")
+                send_telegram(f"🏆 PROFIT BOOKED!\nExit Price: {price}\nProfit: +${realized_pnl:.2f}")
+            elif realized_pnl < 0:
+                print(f"🛡️ PNL REPORT: TRADE CLOSED IN LOSS! Exit Price: {price} | Loss: ${realized_pnl:.2f}")
+                send_telegram(f"🛡️ STOP LOSS HIT\nExit Price: {price}\nLoss: ${realized_pnl:.2f}")
+    except Exception as e:
+        print(f"⚠️ Could not fetch PNL history: {e}")
+
 def run_harmonic_v7():
     print(f"🚀 HARMONIC V7.2 ENGINE STARTED | Divisor: {DIVISOR} | SL: {SL_MULTIPLIER}")
+    
+    was_in_trade = False  # 🧠 BOT MEMORY: Tracks if we just exited a trade
     
     while True:
         try:
@@ -67,10 +87,25 @@ def run_harmonic_v7():
                     pos_amt = float(p['info'].get('positionAmt', 0))
                     break
 
+            # --- THE NEW STATE & LOGGING LOGIC ---
             if pos_amt != 0.0:
-                print(f"⏳ Active Trade Running (Size: {pos_amt}). Waiting...")
+                print(f"⏳ Active Trade Running (Size: {pos_amt}). Waiting for TP/SL...")
+                was_in_trade = True
                 time.sleep(30)
                 continue
+            else:
+                # 🚨 TRADE JUST CLOSED TRIGGER
+                if was_in_trade:
+                    print("\n" + "="*50)
+                    print("🔄 TRADE CLOSED! No active position detected.")
+                    check_recent_pnl()
+                    print("📡 Returning to Scanning Mode...")
+                    print("="*50 + "\n")
+                    was_in_trade = False
+                
+                # 📡 REGULAR SCANNING LOG
+                current_time = time.strftime('%Y-%m-%d %H:%M:%S')
+                print(f"[{current_time}] 📡 Scanning Market {SYMBOL} for 83.3% Pullback...")
 
             # 2. FETCH DATA & FIND IMPULSE
             bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
@@ -113,9 +148,15 @@ def run_harmonic_v7():
                         # Execute Market Order
                         exchange.create_market_buy_order(SYMBOL, trade_size)
                         
-                        # Place Conditional SL & TP
-                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, params={'stopPrice': sl_level})
-                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, params={'stopPrice': geo_target})
+                        # Place Conditional SL & TP (✅ triggerPrice FIX)
+                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, None, params={
+                            'triggerPrice': float(sl_level),
+                            'reduceOnly': True
+                        })
+                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, None, params={
+                            'triggerPrice': float(geo_target),
+                            'reduceOnly': True
+                        })
                         
                         send_telegram(f"🚀 V7.2 LONG Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
                         time.sleep(60)
@@ -139,9 +180,15 @@ def run_harmonic_v7():
                         # Execute Market Order
                         exchange.create_market_sell_order(SYMBOL, trade_size)
                         
-                        # Place Conditional SL & TP
-                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, params={'stopPrice': sl_level})
-                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, params={'stopPrice': geo_target})
+                        # Place Conditional SL & TP (✅ triggerPrice FIX)
+                        exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, None, params={
+                            'triggerPrice': float(sl_level),
+                            'reduceOnly': True
+                        })
+                        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, None, params={
+                            'triggerPrice': float(geo_target),
+                            'reduceOnly': True
+                        })
                         
                         send_telegram(f"📉 V7.2 SHORT Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
                         time.sleep(60)
