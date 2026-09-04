@@ -42,10 +42,17 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            open_orders = exchange.fetch_open_orders(SYMBOL)
-            if len(open_orders) > 0:
-                print(f"🧹 Trade Closed! Clearing {len(open_orders)} Ghost Orders...")
+            # 🚨 THE BULLETPROOF FIX: Fetch BOTH normal and hidden conditional orders
+            normal_orders = exchange.fetch_open_orders(SYMBOL)
+            stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+            
+            total_ghosts = len(normal_orders) + len(stop_orders)
+            
+            if total_ghosts > 0:
+                print(f"🧹 Trade Closed! Clearing {total_ghosts} Ghost Orders...")
+                # Nuclear backup: This cancels everything on the symbol
                 exchange.cancel_all_orders(SYMBOL)
+                
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
 
@@ -71,6 +78,7 @@ def run_harmonic_v7():
     print(f"🚀 HARMONIC V7.2 ENGINE STARTED | Divisor: {DIVISOR} | SL: {SL_MULTIPLIER}")
     
     was_in_trade = False  # 🧠 BOT MEMORY: Tracks if we just exited a trade
+    last_executed_candle_time = None  # 🧠 NAYA MEMORY VARIABLE: Tracks last traded candle
     
     while True:
         try:
@@ -110,6 +118,13 @@ def run_harmonic_v7():
             # 2. FETCH DATA & FIND IMPULSE
             bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
             df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            
+            current_candle_time = df['Timestamp'].iloc[-1] # ⏰ CANDLE KA TIME
+            
+            # 🛑 REVENGE TRADING LOCKOUT: Agar is candle mein trade ho chuka h, toh skip karo!
+            if current_candle_time == last_executed_candle_time:
+                time.sleep(30)
+                continue
             
             window = df.iloc[-LOOKBACK-1:-1] # Ignore currently open candle
             current_candle = df.iloc[-1]
@@ -159,6 +174,7 @@ def run_harmonic_v7():
                         })
                         
                         send_telegram(f"🚀 V7.2 LONG Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
+                        last_executed_candle_time = current_candle_time  # 🔒 LOCK IN THE CANDLE
                         time.sleep(60)
 
             # --- BEARISH SETUP ---
@@ -191,6 +207,7 @@ def run_harmonic_v7():
                         })
                         
                         send_telegram(f"📉 V7.2 SHORT Executed!\nEntry: {entry_level}\nTarget: {geo_target}\nSL: {sl_level}")
+                        last_executed_candle_time = current_candle_time  # 🔒 LOCK IN THE CANDLE
                         time.sleep(60)
 
             time.sleep(30) # Loop delay
