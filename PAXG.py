@@ -4,7 +4,7 @@ import os
 import pandas as pd
 from notifier import send_telegram  # Assuming you have your telegram module
 
-# --- 1. CONFIGURATION & '2.6' SNIPER MATH ---
+# --- 1. CONFIGURATION & V7.2 MATH ---
 SYMBOL = 'PAXG/USDT'     # 🏆 Target Asset: GOLD
 TIMEFRAME = '15m'
 RISK_PERCENT = 0.01
@@ -17,24 +17,30 @@ MIN_RR = 2.0           # Minimum acceptable Risk-to-Reward
 MAX_RR = 7.0           # Maximum RR cap (Prevents over-greed)
 LOOKBACK = 40          # Candles to find the impulse wave
 
-# --- 2. EXCHANGE SETUP ---
-exchange = ccxt.binance({
+# --- 2. EXCHANGE SETUP (DevOps Grade) ---
+exchange_config = {
     'apiKey': os.environ.get('BINANCE_API_KEY'),
     'secret': os.environ.get('BINANCE_SECRET_KEY'),
     'enableRateLimit': True,
     'options': {
         'defaultType': 'future',
         'adjustForTimeDifference': True,
-    },
-    # 🛡️ THE PROXY TUNNEL (Bypasses US Geo-Block 451 Error)
-    # Using CCXT's built-in recommended CORS proxy for environments like Railway
-    'proxyUrl': 'https://cors-anywhere.herokuapp.com/'
-})
+    }
+}
+
+# 🛡️ THE PERMANENT PROXY TUNNEL
+# Automatically fetches the HTTP_PROXY variable from Railway Dashboard
+proxy_url = os.environ.get('HTTP_PROXY')
+if proxy_url:
+    exchange_config['httpProxy'] = proxy_url
+    exchange_config['httpsProxy'] = proxy_url
+
+exchange = ccxt.binance(exchange_config)
 
 # ✅ DEMO MODE ENABLED
 exchange.enable_demo_trading(True)
 
-# 🛡️ INIT: FORCE LEVERAGE (Fixes Insufficient Margin Errors)
+# 🛡️ INIT: FORCE LEVERAGE
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
     print(f"✅ Leverage successfully set to {LEVERAGE}x for {SYMBOL}")
@@ -87,10 +93,20 @@ def check_recent_pnl():
         print(f"⚠️ Could not fetch PNL history: {e}")
 
 def run_gold_v7_engine():
+    print("="*60)
     print(f"🚀 GOLD V7.2 ENGINE STARTED | Target RR: {MIN_RR} to {MAX_RR}")
     
+    # 🌍 LOGGING PROXY STATUS
+    if proxy_url:
+        # Hides password in logs for security
+        safe_proxy = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
+        print(f"🌍 SECURE TUNNEL ACTIVE: Routing via {safe_proxy}")
+    else:
+        print(f"⚠️ No Proxy Detected. (Add HTTP_PROXY to Railway if 451 Errors occur)")
+    print("="*60)
+    
     was_in_trade = False  
-    last_executed_candle_time = None  # 🧠 REVENGE TRADING CANDLE LOCKOUT
+    last_executed_candle_time = None  # 🧠 CANDLE LOCKOUT MEMORY
     
     while True:
         try:
@@ -184,7 +200,7 @@ def run_gold_v7_engine():
                             # Execute Market Order
                             exchange.create_market_buy_order(SYMBOL, trade_size)
                             
-                            # Conditional SL & TP (✅ triggerPrice FIX included)
+                            # Conditional SL & TP
                             exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, None, params={
                                 'triggerPrice': float(sl_level), 'reduceOnly': True
                             })
@@ -221,7 +237,7 @@ def run_gold_v7_engine():
                             # Execute Market Order
                             exchange.create_market_sell_order(SYMBOL, trade_size)
                             
-                            # Conditional SL & TP (✅ triggerPrice FIX included)
+                            # Conditional SL & TP
                             exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, None, params={
                                 'triggerPrice': float(sl_level), 'reduceOnly': True
                             })
