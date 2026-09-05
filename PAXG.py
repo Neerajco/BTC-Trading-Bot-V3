@@ -26,6 +26,9 @@ exchange = ccxt.binance({
         'defaultType': 'future',
         'adjustForTimeDifference': True,
     }
+    # 🛡️ THE PROXY TUNNEL (Bypasses US Geo-Block 451 Error)
+    # Using CCXT's built-in recommended CORS proxy for environments like Railway
+    'proxy': 'https://cors-anywhere.herokuapp.com/'
 })
 
 # ✅ DEMO MODE ENABLED
