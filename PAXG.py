@@ -33,7 +33,7 @@ exchange_config = {
 proxy_url = os.environ.get('HTTP_PROXY')
 if proxy_url:
     exchange_config['httpProxy'] = proxy_url
-    exchange_config['httpsProxy'] = proxy_url
+    # exchange_config['httpsProxy'] = proxy_url
 
 exchange = ccxt.binance(exchange_config)
 
