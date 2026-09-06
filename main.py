@@ -187,8 +187,15 @@ def run_harmonic_v7_btc():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
-                            trade_size = round(risk_amount / risk_per_coin, 3)
+                            #trade_size = round(risk_amount / risk_per_coin, 3)
+                             raw_trade_size = risk_amount / risk_per_coin
+                            # 🛡️ THE MARGIN CAP: (Free_Margin * Leverage * 0.95 safety buffer) / BTC_Price
+                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
+                            trade_size = round(min(raw_trade_size, max_allowed_size), 3)
 
+                        if trade_size <= 0:
+                            print(f"⚠️ Margin too low to take trade. Skipped.")
+                            continue   
                             print(f"🟢 BULLISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
                             # Execute Market Order
@@ -222,8 +229,15 @@ def run_harmonic_v7_btc():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
-                            trade_size = round(risk_amount / risk_per_coin, 3)
+                            #trade_size = round(risk_amount / risk_per_coin, 3)
+                             raw_trade_size = risk_amount / risk_per_coin
+                            # 🛡️ THE MARGIN CAP
+                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
+                            trade_size = round(min(raw_trade_size, max_allowed_size), 3)
 
+                        if trade_size <= 0:
+                            print(f"⚠️ Margin too low to take trade. Skipped.")
+                            continue   
                             print(f"🔴 BEARISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
                             # Execute Market Order
