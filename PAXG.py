@@ -14,7 +14,7 @@ LEVERAGE = 20            # 🛡️ Force Leverage to prevent Insufficient Balanc
 DIVISOR = 1.2          # 83.3% Deep Pullback
 SL_MULTIPLIER = 0.91   # 91.0% Breathing Room
 MIN_RR = 2.0           # Minimum acceptable Risk-to-Reward
-MAX_RR = 7.0           # Maximum RR cap (Prevents over-greed)
+MAX_RR = 7.0           # Strict 1:7 RR cap
 LOOKBACK = 40          # Candles to find the impulse wave
 
 # --- 2. EXCHANGE SETUP (DevOps Grade) ---
@@ -28,13 +28,12 @@ exchange_config = {
     }
 }
 
-# 🛡️ THE PERMANENT PROXY TUNNEL
-# Automatically fetches the HTTP_PROXY variable from Railway Dashboard
+# 🛡️ THE PERMANENT HTTPS PROXY TUNNEL
 proxy_url = os.environ.get('HTTP_PROXY')
 if proxy_url:
-    exchange_config['httpProxy'] = proxy_url
-    # exchange_config['httpsProxy'] = proxy_url
-
+    # ✅ THE FIX: Binance uses HTTPS natively, so we strictly supply httpsProxy
+    exchange_config['httpsProxy'] = proxy_url 
+    #exchange_config['httpProxy'] = proxy_url
 exchange = ccxt.binance(exchange_config)
 
 # ✅ DEMO MODE ENABLED
@@ -98,9 +97,8 @@ def run_gold_v7_engine():
     
     # 🌍 LOGGING PROXY STATUS
     if proxy_url:
-        # Hides password in logs for security
         safe_proxy = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
-        print(f"🌍 SECURE TUNNEL ACTIVE: Routing via {safe_proxy}")
+        print(f"🌍 SECURE HTTPS TUNNEL ACTIVE: Routing via {safe_proxy}")
     else:
         print(f"⚠️ No Proxy Detected. (Add HTTP_PROXY to Railway if 451 Errors occur)")
     print("="*60)
@@ -193,7 +191,15 @@ def run_gold_v7_engine():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
-                            trade_size = round(risk_amount / risk_per_coin, 4)
+                            
+                            # 🛡️ THE MARGIN CAP (Properly Indented for PAXG)
+                            raw_trade_size = risk_amount / risk_per_coin
+                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
+                            trade_size = round(min(raw_trade_size, max_allowed_size), 4)
+
+                            if trade_size <= 0:
+                                print(f"⚠️ Margin too low to take trade. Skipped.")
+                                continue   
 
                             print(f"🟢 BULLISH {SYMBOL} TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
@@ -230,7 +236,15 @@ def run_gold_v7_engine():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
-                            trade_size = round(risk_amount / risk_per_coin, 4)
+                            
+                            # 🛡️ THE MARGIN CAP (Properly Indented for PAXG)
+                            raw_trade_size = risk_amount / risk_per_coin
+                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
+                            trade_size = round(min(raw_trade_size, max_allowed_size), 4)
+
+                            if trade_size <= 0:
+                                print(f"⚠️ Margin too low to take trade. Skipped.")
+                                continue   
 
                             print(f"🔴 BEARISH {SYMBOL} TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
