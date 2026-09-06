@@ -171,7 +171,7 @@ def run_harmonic_v7_btc():
             # Dynamic Position Sizing based on 1.0% total account balance
             risk_amount = usdt_balance * RISK_PERCENT
 
-            # --- BULLISH SETUP ---
+# --- BULLISH SETUP ---
             if swing_low_idx < swing_high_idx: 
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_high - sniper_discount
@@ -187,15 +187,16 @@ def run_harmonic_v7_btc():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
-                            #trade_size = round(risk_amount / risk_per_coin, 3)
-                             raw_trade_size = risk_amount / risk_per_coin
-                            # 🛡️ THE MARGIN CAP: (Free_Margin * Leverage * 0.95 safety buffer) / BTC_Price
+                            
+                            # 🛡️ THE MARGIN CAP (Properly Indented)
+                            raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 3)
 
-                        if trade_size <= 0:
-                            print(f"⚠️ Margin too low to take trade. Skipped.")
-                            continue   
+                            if trade_size <= 0:
+                                print(f"⚠️ Margin too low to take trade. Skipped.")
+                                continue   
+                            
                             print(f"🟢 BULLISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
                             # Execute Market Order
@@ -229,15 +230,16 @@ def run_harmonic_v7_btc():
                         if raw_rr >= MIN_RR:
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
-                            #trade_size = round(risk_amount / risk_per_coin, 3)
-                             raw_trade_size = risk_amount / risk_per_coin
-                            # 🛡️ THE MARGIN CAP
+                            
+                            # 🛡️ THE MARGIN CAP (Properly Indented)
+                            raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 3)
 
-                        if trade_size <= 0:
-                            print(f"⚠️ Margin too low to take trade. Skipped.")
-                            continue   
+                            if trade_size <= 0:
+                                print(f"⚠️ Margin too low to take trade. Skipped.")
+                                continue   
+                            
                             print(f"🔴 BEARISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
                             
                             # Execute Market Order
