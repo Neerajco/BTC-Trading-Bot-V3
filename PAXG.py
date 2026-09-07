@@ -17,6 +17,9 @@ MIN_RR = 2.0           # Minimum acceptable Risk-to-Reward
 MAX_RR = 7.0           # Strict 1:7 RR cap
 LOOKBACK = 40          # Candles to find the impulse wave
 
+# 🧠 BOT MEMORY (Anti-Glitch)
+blacklisted_orders = set()
+
 # --- 2. EXCHANGE SETUP (DevOps Grade) ---
 exchange_config = {
     'apiKey': os.environ.get('BINANCE_API_KEY'),
@@ -33,7 +36,7 @@ proxy_url = os.environ.get('HTTP_PROXY')
 if proxy_url:
     # ✅ THE FIX: Binance uses HTTPS natively, so we strictly supply httpsProxy
     exchange_config['httpsProxy'] = proxy_url 
-    #exchange_config['httpProxy'] = proxy_url
+
 exchange = ccxt.binance(exchange_config)
 
 # ✅ DEMO MODE ENABLED
@@ -47,7 +50,8 @@ except Exception as e:
     print(f"⚠️ Warning: Could not set leverage automatically: {e}. Please ensure it is set to 20x manually in Binance.")
 
 def cleanup_ghost_orders():
-    """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
+    """🧹 Forcefully clears leftover TP/SL orders (With Anti-Glitch Memory)"""
+    global blacklisted_orders
     try:
         positions = exchange.fetch_positions()
         pos_amt = 0.0
@@ -60,15 +64,26 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            # 🚨 THE BULLETPROOF FIX: Fetch BOTH normal and hidden conditional orders
-            normal_orders = exchange.fetch_open_orders(SYMBOL)
-            stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+            # 🚨 Fetch all open orders
+            open_orders = exchange.fetch_open_orders(SYMBOL)
             
-            total_ghosts = len(normal_orders) + len(stop_orders)
+            # Filter out orders we already know are glitched/manually canceled
+            active_ghosts = [o for o in open_orders if o['id'] not in blacklisted_orders]
             
-            if total_ghosts > 0:
-                print(f"🧹 Trade Closed! Clearing {total_ghosts} Ghost Orders for {SYMBOL}...")
-                exchange.cancel_all_orders(SYMBOL)
+            if len(active_ghosts) > 0:
+                print(f"🧹 Trade Closed! Found {len(active_ghosts)} Ghost Orders. Sniping them...")
+                
+                # Targeted Sniping
+                for order in active_ghosts:
+                    order_id = order['id']
+                    try:
+                        exchange.cancel_order(order_id, SYMBOL)
+                        print(f"🔫 Successfully sniped ghost order: {order_id}")
+                    except Exception as e:
+                        print(f"⚠️ API Glitch: Order {order_id} doesn't exist (Likely manual cancel). Blacklisting it!")
+                        blacklisted_orders.add(order_id) # 🔒 Never touch this again
+                
+                time.sleep(2) # Give Binance database time to update
                 
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
@@ -141,6 +156,13 @@ def run_gold_v7_engine():
 
             # 2. FETCH DATA & FIND IMPULSE
             bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
+            
+            # 🛡️ SAFETY WALL: If proxy drops connection or Binance sends empty data
+            if not bars or len(bars) < LOOKBACK:
+                print("⚠️ Incomplete data received from exchange. Retrying...")
+                time.sleep(10)
+                continue
+                
             df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             
             current_candle_time = df['Timestamp'].iloc[-1]
@@ -192,7 +214,7 @@ def run_gold_v7_engine():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (Properly Indented for PAXG)
+                            # 🛡️ THE MARGIN CAP (With 25% Slippage Buffer)
                             raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 4)
@@ -237,7 +259,7 @@ def run_gold_v7_engine():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (Properly Indented for PAXG)
+                            # 🛡️ THE MARGIN CAP (With 25% Slippage Buffer)
                             raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 4)
@@ -265,8 +287,12 @@ def run_gold_v7_engine():
                         else:
                             print(f"⚠️ Weak Bearish RR (1:{raw_rr:.2f}). Skipped.")
 
-            time.sleep(30)
+            # ⏳ LOOP DELAY: Increased to 60s to save proxy bandwidth and prevent timeout errors
+            time.sleep(60)
 
+        except ccxt.NetworkError as e:
+            print(f"📡 Proxy/Network Timeout. Giving it a cooldown. Sleeping for 60s...")
+            time.sleep(60)
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
