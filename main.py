@@ -51,7 +51,6 @@ def cleanup_ghost_orders():
         positions = exchange.fetch_positions()
         pos_amt = 0.0
         
-        # ✅ SYMBOL ISOLATION
         raw_symbol = SYMBOL.replace('/', '').replace(':', '') 
         for p in positions:
             if p['info'].get('symbol') == raw_symbol or p.get('symbol') == SYMBOL:
@@ -59,15 +58,30 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            # 🚨 Fetch BOTH normal and hidden conditional orders
             normal_orders = exchange.fetch_open_orders(SYMBOL)
             stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
             
-            total_ghosts = len(normal_orders) + len(stop_orders)
+            all_ghosts = normal_orders + stop_orders
+            total_ghosts = len(all_ghosts)
             
             if total_ghosts > 0:
                 print(f"🧹 Trade Closed! Clearing {total_ghosts} Ghost Orders for {SYMBOL}...")
-                exchange.cancel_all_orders(SYMBOL)
+                
+                # Method 1: Ask Binance nicely
+                try:
+                    exchange.cancel_all_orders(SYMBOL)
+                except:
+                    pass
+                
+                # Method 2: TARGETED SNIPING (The Bulletproof Fix)
+                for order in all_ghosts:
+                    try:
+                        exchange.cancel_order(order['id'], SYMBOL)
+                        print(f"🔫 Successfully sniped ghost order ID: {order['id']}")
+                    except Exception as e:
+                        pass
+                
+                time.sleep(2) # Give Binance 2 seconds to update its database
                 
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
