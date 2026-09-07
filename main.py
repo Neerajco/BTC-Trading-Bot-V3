@@ -3,6 +3,8 @@ import time
 import os
 import pandas as pd
 from notifier import send_telegram  # Assuming you have your telegram module
+# 🧠 BOT MEMORY
+blacklisted_orders = set()
 
 # --- 1. CONFIGURATION & V7.2 MATH (BTC) ---
 SYMBOL = 'BTC/USDT'      # 🏆 Primary Asset
@@ -46,7 +48,8 @@ except Exception as e:
     print(f"⚠️ Warning: Could not set leverage automatically: {e}. Please ensure it is set to 20x manually in Binance.")
 
 def cleanup_ghost_orders():
-    """🧹 Forcefully clears leftover TP/SL orders if no active position exists."""
+    """🧹 Forcefully clears leftover TP/SL orders (With Anti-Glitch Memory)"""
+    global blacklisted_orders
     try:
         positions = exchange.fetch_positions()
         pos_amt = 0.0
@@ -58,34 +61,27 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            normal_orders = exchange.fetch_open_orders(SYMBOL)
-            stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+            # 🚨 Fetch all open orders
+            open_orders = exchange.fetch_open_orders(SYMBOL)
             
-            all_ghosts = normal_orders + stop_orders
-            total_ghosts = len(all_ghosts)
+            # Filter out orders we already know are glitched/manually canceled
+            active_ghosts = [o for o in open_orders if o['id'] not in blacklisted_orders]
             
-            if total_ghosts > 0:
-                print(f"🧹 Trade Closed! Clearing {total_ghosts} Ghost Orders for {SYMBOL}...")
+            if len(active_ghosts) > 0:
+                print(f"🧹 Trade Closed! Found {len(active_ghosts)} Ghost Orders. Sniping them...")
                 
-                # Method 1: Ask Binance nicely
-                try:
-                    exchange.cancel_all_orders(SYMBOL)
-                except:
-                    pass
-                
-                # Method 2: TARGETED SNIPING (The Bulletproof Fix)
-                for order in all_ghosts:
+                # Targeted Sniping
+                for order in active_ghosts:
+                    order_id = order['id']
                     try:
-                        exchange.cancel_order(order['id'], SYMBOL)
-                        print(f"🔫 Successfully sniped ghost order ID: {order['id']}")
+                        exchange.cancel_order(order_id, SYMBOL)
+                        print(f"🔫 Successfully sniped ghost order: {order_id}")
                     except Exception as e:
-                        pass
-                
-                time.sleep(2) # Give Binance 2 seconds to update its database
+                        print(f"⚠️ API Glitch: Order {order_id} doesn't exist (Likely manual cancel). Blacklisting it!")
+                        blacklisted_orders.add(order_id) # 🔒 Never touch this again
                 
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
-
 def check_recent_pnl():
     """Fetches the last trade from Binance and prints the Realized PNL."""
     try:
