@@ -4,8 +4,6 @@ import os
 import pandas as pd
 from notifier import send_telegram  # Assuming you have your telegram module
 
-# 🧠 BOT MEMORY (Anti-Glitch)
-blacklisted_orders = set()
 
 # --- 1. CONFIGURATION & V7.2 MATH (BTC) ---
 SYMBOL = 'BTC/USDT'      # 🏆 Primary Asset
@@ -49,8 +47,7 @@ except Exception as e:
     print(f"⚠️ Warning: Could not set leverage automatically: {e}. Please ensure it is set to 20x manually in Binance.")
 
 def cleanup_ghost_orders():
-    """🧹 Forcefully clears leftover TP/SL orders (With Anti-Glitch Memory)"""
-    global blacklisted_orders
+    """🧹 Forcefully clears ALL leftover orders (The Nuke Method)"""
     try:
         positions = exchange.fetch_positions()
         pos_amt = 0.0
@@ -62,31 +59,31 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            # 🚨 THE FIX: Fetch BOTH normal Limit and Stop/Conditional orders
+            # Check if ANY orders exist (Limit or Stop)
             normal_orders = exchange.fetch_open_orders(SYMBOL)
             stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+            total_ghosts = len(normal_orders) + len(stop_orders)
             
-            all_open_orders = normal_orders + stop_orders
-            
-            # Filter out orders we already know are glitched/manually canceled
-            active_ghosts = [o for o in all_open_orders if o['id'] not in blacklisted_orders]
-            
-            if len(active_ghosts) > 0:
-                print(f"🧹 Trade Closed/Startup! Found {len(active_ghosts)} Ghost Orders. Sniping them...")
+            if total_ghosts > 0:
+                print(f"🧹 Trade Closed/Startup! Found {total_ghosts} Ghost Orders. Dropping the Nuke...")
                 
-                # Targeted Sniping
-                for order in active_ghosts:
-                    order_id = order['id']
-                    try:
-                        exchange.cancel_order(order_id, SYMBOL)
-                        print(f"🔫 Successfully sniped ghost order: {order_id}")
-                    except Exception as e:
-                        print(f"⚠️ API Glitch: Order {order_id} doesn't exist (Likely manual cancel). Blacklisting it!")
-                        blacklisted_orders.add(order_id) # 🔒 Never touch this again
+                try:
+                    # 🚀 THE NUKE: This tells Binance Futures to cancel EVERYTHING for this symbol
+                    exchange.cancel_all_orders(SYMBOL)
+                    print("☢️ All Limit Orders Cleared!")
+                    
+                    # Some Binance accounts require a specific param to clear conditionals
+                    exchange.cancel_all_orders(SYMBOL, params={'stop': True})
+                    print("☢️ All Conditional Orders Cleared!")
+                    
+                except Exception as e:
+                    print(f"⚠️ Nuke API Error: {e}")
+                
+                time.sleep(2) # Let UI catch up
                 
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
-
+        
 def check_recent_pnl():
     """Fetches the actual MOST RECENT trade accurately, handling split fills."""
     try:
