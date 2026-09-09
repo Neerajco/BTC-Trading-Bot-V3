@@ -3,7 +3,8 @@ import time
 import os
 import pandas as pd
 from notifier import send_telegram  # Assuming you have your telegram module
-# 🧠 BOT MEMORY
+
+# 🧠 BOT MEMORY (Anti-Glitch)
 blacklisted_orders = set()
 
 # --- 1. CONFIGURATION & V7.2 MATH (BTC) ---
@@ -61,14 +62,17 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            # 🚨 Fetch all open orders
-            open_orders = exchange.fetch_open_orders(SYMBOL)
+            # 🚨 THE FIX: Fetch BOTH normal Limit and Stop/Conditional orders
+            normal_orders = exchange.fetch_open_orders(SYMBOL)
+            stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+            
+            all_open_orders = normal_orders + stop_orders
             
             # Filter out orders we already know are glitched/manually canceled
-            active_ghosts = [o for o in open_orders if o['id'] not in blacklisted_orders]
+            active_ghosts = [o for o in all_open_orders if o['id'] not in blacklisted_orders]
             
             if len(active_ghosts) > 0:
-                print(f"🧹 Trade Closed! Found {len(active_ghosts)} Ghost Orders. Sniping them...")
+                print(f"🧹 Trade Closed/Startup! Found {len(active_ghosts)} Ghost Orders. Sniping them...")
                 
                 # Targeted Sniping
                 for order in active_ghosts:
@@ -82,21 +86,31 @@ def cleanup_ghost_orders():
                 
     except Exception as e:
         print(f"⚠️ Cleanup Error: {e}")
+
 def check_recent_pnl():
-    """Fetches the last trade from Binance and prints the Realized PNL."""
+    """Fetches the actual MOST RECENT trade accurately, handling split fills."""
     try:
-        trades = exchange.fetch_my_trades(SYMBOL, limit=2)
+        # Fetching last 10 trades to ensure we capture fragmented orders
+        trades = exchange.fetch_my_trades(SYMBOL, limit=10) 
         if trades:
+            # Sort them strictly by timestamp just to be safe
+            trades.sort(key=lambda x: x['timestamp'])
             last_trade = trades[-1]
             price = last_trade['price']
-            realized_pnl = float(last_trade['info'].get('realizedPnl', '0'))
             
-            if realized_pnl > 0:
-                print(f"🏆 PNL REPORT: TRADE CLOSED IN PROFIT! Exit Price: {price} | Profit: +${realized_pnl:.2f}")
-                send_telegram(f"🏆 PROFIT BOOKED!\nExit Price: {price}\nProfit: +${realized_pnl:.2f}")
-            elif realized_pnl < 0:
-                print(f"🛡️ PNL REPORT: TRADE CLOSED IN LOSS! Exit Price: {price} | Loss: ${realized_pnl:.2f}")
-                send_telegram(f"🛡️ STOP LOSS HIT\nExit Price: {price}\nLoss: ${realized_pnl:.2f}")
+            # Sum up realized PNL for the last 5 minutes (to handle split orders correctly)
+            five_mins_ago = time.time() * 1000 - (5 * 60 * 1000)
+            total_realized = sum(
+                float(t['info'].get('realizedPnl', '0')) 
+                for t in trades if t['timestamp'] >= five_mins_ago
+            )
+
+            if total_realized > 0:
+                print(f"🏆 PNL REPORT: TRADE CLOSED IN PROFIT! Exit Price: {price} | Profit: +${total_realized:.2f}")
+                send_telegram(f"🏆 PROFIT BOOKED!\nExit Price: {price}\nProfit: +${total_realized:.2f}")
+            elif total_realized < 0:
+                print(f"🛡️ PNL REPORT: TRADE CLOSED IN LOSS! Exit Price: {price} | Loss: ${total_realized:.2f}")
+                send_telegram(f"🛡️ STOP LOSS HIT\nExit Price: {price}\nLoss: ${total_realized:.2f}")
     except Exception as e:
         print(f"⚠️ Could not fetch PNL history: {e}")
 
@@ -105,6 +119,10 @@ def run_harmonic_v7_btc():
     print(f"🚀 BTC HARMONIC V7.2 ENGINE STARTED")
     print(f"⚙️ Divisor: {DIVISOR} | Target RR: {MIN_RR} to {MAX_RR}")
     print("="*60)
+    
+    # 🧹 FORCE CLEANUP ON STARTUP (Clears anything left behind during restarts)
+    print("🧹 Performing Startup Deep Clean...")
+    cleanup_ghost_orders()
     
     was_in_trade = False  
     last_executed_candle_time = None  # 🧠 NAYA MEMORY VARIABLE: Tracks last traded candle
@@ -144,6 +162,12 @@ def run_harmonic_v7_btc():
 
             # 2. FETCH DATA & FIND IMPULSE
             bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
+            
+            # 🛡️ SAFETY WALL
+            if not bars or len(bars) < LOOKBACK:
+                time.sleep(10)
+                continue
+                
             df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             
             current_candle_time = df['Timestamp'].iloc[-1]
@@ -181,7 +205,7 @@ def run_harmonic_v7_btc():
             # Dynamic Position Sizing based on 1.0% total account balance
             risk_amount = usdt_balance * RISK_PERCENT
 
-# --- BULLISH SETUP ---
+            # --- BULLISH SETUP ---
             if swing_low_idx < swing_high_idx: 
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_high - sniper_discount
@@ -198,7 +222,7 @@ def run_harmonic_v7_btc():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (Properly Indented)
+                            # 🛡️ THE MARGIN CAP (With Slippage Buffer)
                             raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 3)
@@ -241,7 +265,7 @@ def run_harmonic_v7_btc():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (Properly Indented)
+                            # 🛡️ THE MARGIN CAP (With Slippage Buffer)
                             raw_trade_size = risk_amount / risk_per_coin
                             max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
                             trade_size = round(min(raw_trade_size, max_allowed_size), 3)
@@ -269,6 +293,9 @@ def run_harmonic_v7_btc():
 
             time.sleep(30) # Loop delay
 
+        except ccxt.NetworkError as e:
+            print(f"📡 Network Timeout. Giving it a cooldown. Sleeping for 60s...")
+            time.sleep(60)
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
