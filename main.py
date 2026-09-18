@@ -32,7 +32,7 @@ exchange_config = {
     }
 }
 exchange = ccxt.binance(exchange_config)
-# exchange.enable_demo_trading(True) # Uncomment for Demo, comment out for Real Money
+exchange.enable_demo_trading(True) # Uncomment for Demo, comment out for Real Money
 
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
