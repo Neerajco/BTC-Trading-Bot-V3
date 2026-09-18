@@ -2,23 +2,26 @@ import ccxt
 import time
 import os
 import pandas as pd
-from notifier import send_telegram  # Assuming you have your telegram module
+from notifier import send_telegram  # Make sure your telegram module is active
 
+# ==========================================
+# 1. V7.4 CONFIGURATION (THE GOLDEN FORMULA)
+# ==========================================
+SYMBOL = 'BTC/USDT'      # Asset
+TIMEFRAME = '15m'        # The Compounding Timeframe
+RISK_PERCENT = 0.02      # 🎯 2% Aggressive Compounding Risk
+LEVERAGE = 20            
+PRICE_RANGE_FILTER = 150 # 30 for PAXG. Ignores choppy tiny swings
 
-# --- 1. CONFIGURATION & V7.2 MATH (BTC) ---
-SYMBOL = 'BTC/USDT'      # 🏆 Primary Asset
-TIMEFRAME = '15m'
-RISK_PERCENT = 0.01      # 1% Risk per trade
-LEVERAGE = 20            # 🛡️ Force Leverage to prevent Insufficient Balance
+# 🎯 HARMONIC V7.4 MATH
+DIVISOR = 1.2          # 83.3% Pullback
+SL_MULTIPLIER = 0.90   # Tight Stop Loss
+MIN_RR = 2.0           
+MAX_RR = 10.0          # Max Cap
 
-# 🎯 HARMONIC V7.2 PARAMETERS
-DIVISOR = 1.2          # 83.3% Deep Pullback
-SL_MULTIPLIER = 0.91   # 91.0% Breathing Room
-MIN_RR = 2.0           # Minimum acceptable Risk-to-Reward
-MAX_RR = 7.0           # Strict 1:7 RR cap
-LOOKBACK = 40          # Candles to find the impulse wave
-
-# --- 2. EXCHANGE SETUP ---
+# ==========================================
+# 2. EXCHANGE SETUP (EU-WEST NATIVE, NO PROXY)
+# ==========================================
 exchange_config = {
     'apiKey': os.environ.get('BINANCE_API_KEY'),
     'secret': os.environ.get('BINANCE_SECRET_KEY'),
@@ -28,30 +31,23 @@ exchange_config = {
         'adjustForTimeDifference': True,
     }
 }
-
-# (Optional) DevOps Proxy Guardrail - Won't do anything if variable doesn't exist
-proxy_url = os.environ.get('MY_CUSTOM_PROXY')
-if proxy_url:
-    exchange_config['httpProxy'] = proxy_url
-
 exchange = ccxt.binance(exchange_config)
+# exchange.enable_demo_trading(True) # Uncomment for Demo, comment out for Real Money
 
-# ✅ THE FINAL FIX: Official method for Demo Trading
-exchange.enable_demo_trading(True)
-
-# 🛡️ INIT: FORCE LEVERAGE (Fixes Insufficient Margin Error)
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
     print(f"✅ Leverage successfully set to {LEVERAGE}x for {SYMBOL}")
 except Exception as e:
-    print(f"⚠️ Warning: Could not set leverage automatically: {e}. Please ensure it is set to 20x manually in Binance.")
+    print(f"⚠️ Warning: Set leverage manually to {LEVERAGE}x in Binance.")
 
+# ==========================================
+# 3. HELPER FUNCTIONS
+# ==========================================
 def cleanup_ghost_orders():
-    """🧹 Forcefully clears ALL leftover orders (The Nuke Method)"""
+    """🧹 Clears all leftover orders (The Nuke Method)"""
     try:
         positions = exchange.fetch_positions()
         pos_amt = 0.0
-        
         raw_symbol = SYMBOL.replace('/', '').replace(':', '') 
         for p in positions:
             if p['info'].get('symbol') == raw_symbol or p.get('symbol') == SYMBOL:
@@ -59,151 +55,148 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            # Check if ANY orders exist (Limit or Stop)
             normal_orders = exchange.fetch_open_orders(SYMBOL)
             stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
-            total_ghosts = len(normal_orders) + len(stop_orders)
-            
-            if total_ghosts > 0:
-                print(f"🧹 Trade Closed/Startup! Found {total_ghosts} Ghost Orders. Dropping the Nuke...")
-                
-                try:
-                    # 🚀 THE NUKE: This tells Binance Futures to cancel EVERYTHING for this symbol
-                    exchange.cancel_all_orders(SYMBOL)
-                    print("☢️ All Limit Orders Cleared!")
-                    
-                    # Some Binance accounts require a specific param to clear conditionals
-                    exchange.cancel_all_orders(SYMBOL, params={'stop': True})
-                    print("☢️ All Conditional Orders Cleared!")
-                    
-                except Exception as e:
-                    print(f"⚠️ Nuke API Error: {e}")
-                
-                time.sleep(2) # Let UI catch up
-                
+            if len(normal_orders) + len(stop_orders) > 0:
+                print("🧹 Cleaning up Ghost Orders...")
+                exchange.cancel_all_orders(SYMBOL)
+                time.sleep(1)
     except Exception as e:
-        print(f"⚠️ Cleanup Error: {e}")
-        
-def check_recent_pnl():
-    """Fetches the actual MOST RECENT trade accurately, handling split fills."""
+        pass
+
+def update_trailing_sl(new_sl, tp_price, amount, side):
+    """🧲 Cancels old Stop-Loss and places a new one to Lock Profits"""
     try:
-        # Fetching last 10 trades to ensure we capture fragmented orders
-        trades = exchange.fetch_my_trades(SYMBOL, limit=10) 
-        if trades:
-            # Sort them strictly by timestamp just to be safe
-            trades.sort(key=lambda x: x['timestamp'])
-            last_trade = trades[-1]
-            price = last_trade['price']
-            
-            # Sum up realized PNL for the last 5 minutes (to handle split orders correctly)
-            five_mins_ago = time.time() * 1000 - (5 * 60 * 1000)
-            total_realized = sum(
-                float(t['info'].get('realizedPnl', '0')) 
-                for t in trades if t['timestamp'] >= five_mins_ago
-            )
-
-            if total_realized > 0:
-                print(f"🏆 PNL REPORT: TRADE CLOSED IN PROFIT! Exit Price: {price} | Profit: +${total_realized:.2f}")
-                send_telegram(f"🏆 PROFIT BOOKED!\nExit Price: {price}\nProfit: +${total_realized:.2f}")
-            elif total_realized < 0:
-                print(f"🛡️ PNL REPORT: TRADE CLOSED IN LOSS! Exit Price: {price} | Loss: ${total_realized:.2f}")
-                send_telegram(f"🛡️ STOP LOSS HIT\nExit Price: {price}\nLoss: ${total_realized:.2f}")
+        exchange.cancel_all_orders(SYMBOL) # Kill old TP & SL
+        time.sleep(1)
+        
+        close_side = 'sell' if side == 'long' else 'buy'
+        
+        # Place New SL
+        exchange.create_order(SYMBOL, 'STOP_MARKET', close_side, amount, None, params={
+            'stopPrice': float(new_sl), 'reduceOnly': True
+        })
+        # Place Same TP back
+        exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', close_side, amount, None, params={
+            'stopPrice': float(tp_price), 'reduceOnly': True
+        })
+        return True
     except Exception as e:
-        print(f"⚠️ Could not fetch PNL history: {e}")
+        print(f"⚠️ Error updating Trailing SL: {e}")
+        return False
 
-def run_harmonic_v7_btc():
+# ==========================================
+# 4. THE V7.4 MASTER ENGINE
+# ==========================================
+def run_v74_engine():
     print("="*60)
-    print(f"🚀 BTC HARMONIC V7.2 ENGINE STARTED")
-    print(f"⚙️ Divisor: {DIVISOR} | Target RR: {MIN_RR} to {MAX_RR}")
+    print(f"🚀 V7.4 ENGINE STARTED | RISK: {RISK_PERCENT*100}% | SL: MULTI-TIER")
     print("="*60)
     
-    # 🧹 FORCE CLEANUP ON STARTUP (Clears anything left behind during restarts)
-    print("🧹 Performing Startup Deep Clean...")
     cleanup_ghost_orders()
-    
-    was_in_trade = False  
-    last_executed_candle_time = None  # 🧠 NAYA MEMORY VARIABLE: Tracks last traded candle
+    active_trade_state = None  # Holds local memory for trailing SL
     
     while True:
         try:
-            # 1. CLEANUP GHOST ORDERS FIRST
-            cleanup_ghost_orders()
-
-            # Check active position safely
+            # --- CHECK POSITION STATE ---
             positions = exchange.fetch_positions()
             pos_amt = 0.0
-            
             raw_symbol = SYMBOL.replace('/', '').replace(':', '')
             for p in positions:
                 if p['info'].get('symbol') == raw_symbol or p.get('symbol') == SYMBOL:
                     pos_amt = float(p['info'].get('positionAmt', 0))
                     break
 
-            # --- STATE LOGIC ---
+            # 🧲 MULTI-TIER TRAILING SL LOGIC
             if pos_amt != 0.0:
-                print(f"⏳ Active Trade Running (Size: {pos_amt}). Waiting for TP/SL...")
-                was_in_trade = True
-                time.sleep(30)
-                continue
-            else:
-                if was_in_trade:
-                    print("\n" + "="*50)
-                    print("🔄 TRADE CLOSED! No active position detected.")
-                    check_recent_pnl()
-                    print("📡 Returning to Scanning Mode...")
-                    print("="*50 + "\n")
-                    was_in_trade = False
-                
-                current_time = time.strftime('%Y-%m-%d %H:%M:%S')
-                print(f"[{current_time}] 📡 Scanning Market {SYMBOL} for 83.3% Pullback...")
+                if active_trade_state is not None:
+                    ticker = exchange.fetch_ticker(SYMBOL)
+                    current_price = float(ticker['last'])
+                    
+                    entry = active_trade_state['entry']
+                    initial_sl = active_trade_state['initial_sl']
+                    risk_dist = abs(entry - initial_sl)
+                    
+                    if active_trade_state['side'] == 'long':
+                        current_rr = (current_price - entry) / risk_dist if risk_dist > 0 else 0
+                        
+                        if current_rr >= 4.0 and active_trade_state['locked_level'] < 2:
+                            new_sl = entry + (risk_dist * 2.0)
+                            if update_trailing_sl(new_sl, active_trade_state['tp'], abs(pos_amt), 'long'):
+                                active_trade_state['locked_level'] = 2
+                                print(f"🔒 [LONG] 1:4 Profit Locked! New SL: {new_sl}")
+                                send_telegram(f"🔒 {SYMBOL} 1:4 Profit Locked! Trailing SL moved to {new_sl:.2f}")
+                                
+                        elif current_rr >= 1.0 and active_trade_state['locked_level'] < 1:
+                            new_sl = entry
+                            if update_trailing_sl(new_sl, active_trade_state['tp'], abs(pos_amt), 'long'):
+                                active_trade_state['locked_level'] = 1
+                                print(f"🛡️ [LONG] 1:1 Hit! Break-Even Secured. New SL: {new_sl}")
+                                send_telegram(f"🛡️ {SYMBOL} Break-Even Secured at {new_sl:.2f}")
 
-            # 2. FETCH DATA & FIND IMPULSE
-            bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOKBACK + 5)
-            
-            # 🛡️ SAFETY WALL
-            if not bars or len(bars) < LOOKBACK:
-                time.sleep(10)
-                continue
-                
-            df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-            
-            current_candle_time = df['Timestamp'].iloc[-1]
-            
-            # 🛑 REVENGE TRADING LOCKOUT: Prevents "Machine-Gun" bug
-            if current_candle_time == last_executed_candle_time:
+                    elif active_trade_state['side'] == 'short':
+                        current_rr = (entry - current_price) / risk_dist if risk_dist > 0 else 0
+                        
+                        if current_rr >= 4.0 and active_trade_state['locked_level'] < 2:
+                            new_sl = entry - (risk_dist * 2.0)
+                            if update_trailing_sl(new_sl, active_trade_state['tp'], abs(pos_amt), 'short'):
+                                active_trade_state['locked_level'] = 2
+                                print(f"🔒 [SHORT] 1:4 Profit Locked! New SL: {new_sl}")
+                                send_telegram(f"🔒 {SYMBOL} 1:4 Profit Locked! Trailing SL moved to {new_sl:.2f}")
+                                
+                        elif current_rr >= 1.0 and active_trade_state['locked_level'] < 1:
+                            new_sl = entry
+                            if update_trailing_sl(new_sl, active_trade_state['tp'], abs(pos_amt), 'short'):
+                                active_trade_state['locked_level'] = 1
+                                print(f"🛡️ [SHORT] 1:1 Hit! Break-Even Secured. New SL: {new_sl}")
+                                send_telegram(f"🛡️ {SYMBOL} Break-Even Secured at {new_sl:.2f}")
+
                 time.sleep(30)
                 continue
+                
+            else:
+                # Flat state, reset memory
+                if active_trade_state is not None:
+                    print("🔄 Trade Closed. Returning to Scan Mode.")
+                    active_trade_state = None
+                
+                cleanup_ghost_orders()
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Scanning Market {SYMBOL}...")
+
+            # --- FETCH DATA & EMA 200 ---
+            bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=250)
+            if not bars: continue
             
-            window = df.iloc[-LOOKBACK-1:-1] # Ignore currently open candle
+            df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+            
+            lookback = 40
+            window = df.iloc[-lookback-1:-1]
             current_candle = df.iloc[-1]
+            current_ema = current_candle['EMA_200']
             
-            swing_low = window['Low'].min()
-            swing_high = window['High'].max()
-            swing_low_idx = window['Low'].idxmin()
-            swing_high_idx = window['High'].idxmax()
+            swing_low, swing_high = window['Low'].min(), window['High'].max()
+            swing_low_idx, swing_high_idx = window['Low'].idxmin(), window['High'].idxmax()
             price_range = swing_high - swing_low
 
-            # BTC Price filter: Ignore flat chops under $150
-            if price_range < 150: 
+            if price_range < PRICE_RANGE_FILTER: 
                 time.sleep(30)
                 continue
 
-            # 3. SMART BALANCE CHECK & EXECUTION
             balance_data = exchange.fetch_balance()
             usdt_balance = float(balance_data['USDT']['free'])
-            
-            # 🚨 INSUFFICIENT BALANCE SAFETY CATCH
-            # Pauses bot if free margin is critically low, preventing crash
             if usdt_balance < 20:
-                print(f"⚠️ INSUFFICIENT FREE MARGIN! Available: ${usdt_balance:.2f}. Pausing bot for 5 mins.")
                 time.sleep(300)
                 continue
-
-            # Dynamic Position Sizing based on 1.0% total account balance
+                
             risk_amount = usdt_balance * RISK_PERCENT
 
             # --- BULLISH SETUP ---
             if swing_low_idx < swing_high_idx: 
+                if current_candle['Close'] < current_ema: 
+                    time.sleep(30)
+                    continue # 🛡️ Trend Filter Blocked Down-Trend Buy
+                
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_high - sniper_discount
 
@@ -219,34 +212,25 @@ def run_harmonic_v7_btc():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (With Slippage Buffer)
-                            raw_trade_size = risk_amount / risk_per_coin
-                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
-                            trade_size = round(min(raw_trade_size, max_allowed_size), 3)
+                            trade_size = round(risk_amount / risk_per_coin, 4)
 
-                            if trade_size <= 0:
-                                print(f"⚠️ Margin too low to take trade. Skipped.")
-                                continue   
-                            
-                            print(f"🟢 BULLISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
-                            
-                            # Execute Market Order
                             exchange.create_market_buy_order(SYMBOL, trade_size)
+                            exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, None, params={'stopPrice': float(sl_level), 'reduceOnly': True})
+                            exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, None, params={'stopPrice': float(tp_level), 'reduceOnly': True})
                             
-                            # Place Conditional SL & TP
-                            exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, None, params={
-                                'triggerPrice': float(sl_level), 'reduceOnly': True
-                            })
-                            exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, None, params={
-                                'triggerPrice': float(tp_level), 'reduceOnly': True
-                            })
+                            # Save State for Trailing SL
+                            active_trade_state = {'side': 'long', 'entry': entry_level, 'initial_sl': sl_level, 'tp': tp_level, 'locked_level': 0}
                             
-                            send_telegram(f"🚀 V7.2 LONG Executed!\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRR: 1:{applied_rr:.2f}")
-                            last_executed_candle_time = current_candle_time  # 🔒 LOCK IN THE CANDLE
+                            msg = f"🚀 {SYMBOL} LONG (V7.4)\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRisk: ${risk_amount:.2f}"
+                            send_telegram(msg)
                             time.sleep(60)
 
             # --- BEARISH SETUP ---
             elif swing_high_idx < swing_low_idx:  
+                if current_candle['Close'] > current_ema:
+                    time.sleep(30)
+                    continue # 🛡️ Trend Filter Blocked Up-Trend Sell
+
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_low + sniper_discount
 
@@ -262,40 +246,27 @@ def run_harmonic_v7_btc():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
                             
-                            # 🛡️ THE MARGIN CAP (With Slippage Buffer)
-                            raw_trade_size = risk_amount / risk_per_coin
-                            max_allowed_size = (usdt_balance * LEVERAGE * 0.75) / entry_level
-                            trade_size = round(min(raw_trade_size, max_allowed_size), 3)
+                            trade_size = round(risk_amount / risk_per_coin, 4)
 
-                            if trade_size <= 0:
-                                print(f"⚠️ Margin too low to take trade. Skipped.")
-                                continue   
-                            
-                            print(f"🔴 BEARISH V7.2 TRIGGERED! Entry: {entry_level:.2f} | Applied RR: 1:{applied_rr:.2f}")
-                            
-                            # Execute Market Order
                             exchange.create_market_sell_order(SYMBOL, trade_size)
+                            exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, None, params={'stopPrice': float(sl_level), 'reduceOnly': True})
+                            exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, None, params={'stopPrice': float(tp_level), 'reduceOnly': True})
                             
-                            # Place Conditional SL & TP
-                            exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, None, params={
-                                'triggerPrice': float(sl_level), 'reduceOnly': True
-                            })
-                            exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, None, params={
-                                'triggerPrice': float(tp_level), 'reduceOnly': True
-                            })
+                            # Save State for Trailing SL
+                            active_trade_state = {'side': 'short', 'entry': entry_level, 'initial_sl': sl_level, 'tp': tp_level, 'locked_level': 0}
                             
-                            send_telegram(f"📉 V7.2 SHORT Executed!\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRR: 1:{applied_rr:.2f}")
-                            last_executed_candle_time = current_candle_time  # 🔒 LOCK IN THE CANDLE
+                            msg = f"📉 {SYMBOL} SHORT (V7.4)\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRisk: ${risk_amount:.2f}"
+                            send_telegram(msg)
                             time.sleep(60)
 
-            time.sleep(30) # Loop delay
-
-        except ccxt.NetworkError as e:
-            print(f"📡 Network Timeout. Giving it a cooldown. Sleeping for 60s...")
+            time.sleep(60)
+            
+        except ccxt.NetworkError:
+            print("📡 Network Error. Sleeping 60s...")
             time.sleep(60)
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
 
 if __name__ == '__main__':
-    run_harmonic_v7_btc()
+    run_v74_engine()
