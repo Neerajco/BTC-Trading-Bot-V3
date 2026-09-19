@@ -32,7 +32,8 @@ exchange_config = {
     }
 }
 exchange = ccxt.binance(exchange_config)
-exchange.enable_demo_trading(True) # Uncomment for Demo, comment out for Real Money
+# 🛡️ UNCOMMENT BELOW LINE IF USING TESTNET/DEMO ACCOUNT 
+exchange.set_sandbox_mode(True) 
 
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
@@ -191,11 +192,13 @@ def run_v74_engine():
                 
             risk_amount = usdt_balance * RISK_PERCENT
 
+            # ==========================================
             # --- BULLISH SETUP ---
+            # ==========================================
             if swing_low_idx < swing_high_idx: 
                 if current_candle['Close'] < current_ema: 
                     time.sleep(30)
-                    continue # 🛡️ Trend Filter Blocked Down-Trend Buy
+                    continue 
                 
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_high - sniper_discount
@@ -212,24 +215,36 @@ def run_v74_engine():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level + (risk_per_coin * applied_rr)
                             
-                            trade_size = round(risk_amount / risk_per_coin, 4)
+                            # 🛡️ THE MARGIN CAPPER (BULLISH)
+                            ideal_trade_size = risk_amount / risk_per_coin
+                            notional_value = ideal_trade_size * entry_level
+                            margin_required = notional_value / LEVERAGE
+                            max_allowed_margin = usdt_balance * 0.90
+                            
+                            if margin_required > max_allowed_margin:
+                                max_notional = max_allowed_margin * LEVERAGE
+                                trade_size = round(max_notional / entry_level, 4)
+                                print(f"⚠️ Margin Capped! Reduced size from {ideal_trade_size:.4f} to {trade_size:.4f}")
+                            else:
+                                trade_size = round(ideal_trade_size, 4)
 
                             exchange.create_market_buy_order(SYMBOL, trade_size)
                             exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', trade_size, None, params={'stopPrice': float(sl_level), 'reduceOnly': True})
                             exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'sell', trade_size, None, params={'stopPrice': float(tp_level), 'reduceOnly': True})
                             
-                            # Save State for Trailing SL
                             active_trade_state = {'side': 'long', 'entry': entry_level, 'initial_sl': sl_level, 'tp': tp_level, 'locked_level': 0}
                             
                             msg = f"🚀 {SYMBOL} LONG (V7.4)\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRisk: ${risk_amount:.2f}"
                             send_telegram(msg)
                             time.sleep(60)
 
+            # ==========================================
             # --- BEARISH SETUP ---
+            # ==========================================
             elif swing_high_idx < swing_low_idx:  
                 if current_candle['Close'] > current_ema:
                     time.sleep(30)
-                    continue # 🛡️ Trend Filter Blocked Up-Trend Sell
+                    continue 
 
                 sniper_discount = price_range / DIVISOR
                 entry_level = swing_low + sniper_discount
@@ -246,13 +261,23 @@ def run_v74_engine():
                             applied_rr = min(raw_rr, MAX_RR)
                             tp_level = entry_level - (risk_per_coin * applied_rr)
                             
-                            trade_size = round(risk_amount / risk_per_coin, 4)
+                            # 🛡️ THE MARGIN CAPPER (BEARISH)
+                            ideal_trade_size = risk_amount / risk_per_coin
+                            notional_value = ideal_trade_size * entry_level
+                            margin_required = notional_value / LEVERAGE
+                            max_allowed_margin = usdt_balance * 0.90
+                            
+                            if margin_required > max_allowed_margin:
+                                max_notional = max_allowed_margin * LEVERAGE
+                                trade_size = round(max_notional / entry_level, 4)
+                                print(f"⚠️ Margin Capped! Reduced size from {ideal_trade_size:.4f} to {trade_size:.4f}")
+                            else:
+                                trade_size = round(ideal_trade_size, 4)
 
                             exchange.create_market_sell_order(SYMBOL, trade_size)
                             exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', trade_size, None, params={'stopPrice': float(sl_level), 'reduceOnly': True})
                             exchange.create_order(SYMBOL, 'TAKE_PROFIT_MARKET', 'buy', trade_size, None, params={'stopPrice': float(tp_level), 'reduceOnly': True})
                             
-                            # Save State for Trailing SL
                             active_trade_state = {'side': 'short', 'entry': entry_level, 'initial_sl': sl_level, 'tp': tp_level, 'locked_level': 0}
                             
                             msg = f"📉 {SYMBOL} SHORT (V7.4)\nEntry: {entry_level:.2f}\nTarget: {tp_level:.2f}\nSL: {sl_level:.2f}\nRisk: ${risk_amount:.2f}"
