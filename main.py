@@ -33,7 +33,8 @@ exchange_config = {
 }
 exchange = ccxt.binance(exchange_config)
 # 🛡️ UNCOMMENT BELOW LINE IF USING TESTNET/DEMO ACCOUNT 
-exchange.set_sandbox_mode(True) 
+#exchange.set_sandbox_mode(True)
+exchange.enable_demo_trading(True)
 
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
