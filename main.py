@@ -33,8 +33,7 @@ exchange_config = {
 }
 exchange = ccxt.binance(exchange_config)
 # 🛡️ UNCOMMENT BELOW LINE IF USING TESTNET/DEMO ACCOUNT 
-#exchange.set_sandbox_mode(True)
-exchange.enable_demo_trading(True)
+exchange.enable_demo_trading(True) 
 
 try:
     exchange.set_leverage(LEVERAGE, SYMBOL)
@@ -43,10 +42,30 @@ except Exception as e:
     print(f"⚠️ Warning: Set leverage manually to {LEVERAGE}x in Binance.")
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS (THE SNIPER FIX)
 # ==========================================
+def kill_all_active_orders():
+    """🔫 Bulletproof method to kill Normal and Conditional Orders by ID"""
+    try:
+        normal = exchange.fetch_open_orders(SYMBOL)
+        conditional = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
+        all_orders = normal + conditional
+        
+        killed_count = 0
+        if len(all_orders) > 0:
+            for order in all_orders:
+                try:
+                    exchange.cancel_order(order['id'], SYMBOL)
+                    killed_count += 1
+                except:
+                    pass
+        return killed_count
+    except Exception as e:
+        print(f"⚠️ Order Kill Error: {e}")
+        return 0
+
 def cleanup_ghost_orders():
-    """🧹 Clears all leftover orders (The Nuke Method)"""
+    """🧹 Clears all leftover orders (The Sniper Method)"""
     try:
         positions = exchange.fetch_positions()
         pos_amt = 0.0
@@ -57,11 +76,9 @@ def cleanup_ghost_orders():
                 break
         
         if pos_amt == 0.0:
-            normal_orders = exchange.fetch_open_orders(SYMBOL)
-            stop_orders = exchange.fetch_open_orders(SYMBOL, params={'stop': True})
-            if len(normal_orders) + len(stop_orders) > 0:
-                print("🧹 Cleaning up Ghost Orders...")
-                exchange.cancel_all_orders(SYMBOL)
+            killed = kill_all_active_orders()
+            if killed > 0:
+                print(f"🧹 Successfully SNIPED {killed} Ghost Orders!")
                 time.sleep(1)
     except Exception as e:
         pass
@@ -69,7 +86,7 @@ def cleanup_ghost_orders():
 def update_trailing_sl(new_sl, tp_price, amount, side):
     """🧲 Cancels old Stop-Loss and places a new one to Lock Profits"""
     try:
-        exchange.cancel_all_orders(SYMBOL) # Kill old TP & SL
+        kill_all_active_orders() # 🔫 Kill old TP & SL using Sniper method
         time.sleep(1)
         
         close_side = 'sell' if side == 'long' else 'buy'
