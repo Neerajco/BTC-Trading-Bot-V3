@@ -5,28 +5,31 @@ import pandas as pd
 from notifier import send_telegram
 
 # ==============================================================================
-# ⚙️ SECTION 1: GLOBAL & STRATEGY CONFIGURATION
+# ⚙️ SECTION 1: GLOBAL & STRATEGY CONFIGURATION (CHAMPION: 0.03, 700, 1.3, 0.95)
 # ==============================================================================
-SYMBOL = 'BTC/USDT'              # 'BTC/USDT' or 'PAXG/USDT'
+SYMBOL = 'BTC/USDT'              # Asset ('BTC/USDT' or 'PAXG/USDT')
 TIMEFRAME = '15m'                # Execution Timeframe
-RISK_PERCENT = 0.02              # 2% Risk per trade
+RISK_PERCENT = 0.03              # 🏆 3% Risk per trade (0.03)
 LEVERAGE = 20                    # Exchange Leverage
 USE_DEMO_TRADING = True          # True = Binance Demo/Testnet, False = Real Live Account
 
-# 🛡️ OPERATIONAL SAFETY GUARDS (DO NOT LOWER THESE)
-MAX_NOTIONAL_MULT = 4.0          # Max Position Size = 4x of Account Balance (Prevents $80 Fee Burn)
-MIN_SL_DISTANCE_PCT = 0.0018     # Min SL distance = 0.18% (~$150 on BTC) to avoid 1-sec spread hits
+# 🛡️ OPERATIONAL & FEE GUARDS (MATCHES BACKTESTER 100%)
+MAX_NOTIONAL_MULT = 10.0         # Max Position Size = 10x of Balance (Safe inside 20x Leverage)
 EMERGENCY_SL_PCT = 0.0100        # 1% Emergency SL if a naked position is ever detected
-FEE_BUFFER_PCT = 0.0012          # 0.12% buffer added to 1:1 Break-Even to cover Binance Taker Fees
 
-# 🎯 STRATEGY PARAMETERS (V7.4 Harmonic)
-PRICE_RANGE_FILTER = 150         # 150 for BTC, 15 for PAXG
-DIVISOR = 1.2                    # 83.3% Pullback
-SL_MULTIPLIER = 0.90             # Tight Stop Loss Multiplier
-MIN_RR = 2.0                     # Minimum Theoretical RR
-MIN_LIVE_EXECUTION_RR = 1.6      # Minimum Real RR at Live Market Price after candle close
-MAX_RR = 10.0                    # Maximum RR Cap
-LOOKBACK = 40                    # Swing Lookback Candles
+# 🎯 CHAMPION STRATEGY PARAMETERS: (0.03, 700, 1.3, 0.95)
+PRICE_RANGE_FILTER = 700         # 🏆 700 Minimum Swing Range Filter for BTC
+DIVISOR = 1.3                    # 🏆 76.92% Pullback Entry
+SL_MULTIPLIER = 0.95             # 🏆 95.0% Wide Stop-Loss (18.08% Cushion)
+MIN_RR = 2.0                     # Minimum Theoretical Reward-to-Risk
+MAX_RR = 10.0                    # Maximum Reward-to-Risk Cap
+LOOKBACK = 40                    # 40-Candle Swing Lookback Window
+
+# 🧲 MULTI-TIER TRAILING SL PARAMETERS: (0.25R BE, 4.0R -> 2.2R)
+BE_TRIGGER_RR = 1.0              # Trigger Break-Even at 1.0R
+BE_LOCK_RR = 0.25                # Lock +0.25R at Break-Even (Covers Binance Fees + Net Profit)
+TRAIL_TRIGGER_RR = 4.0           # Trigger Profit Lock at 4.0R
+TRAIL_LOCK_RR = 2.2              # Lock +2.2R Profit when 4.0R is reached
 
 # ==============================================================================
 # 🔌 SECTION 2: EXCHANGE INITIALIZATION (IMMUTABLE)
@@ -53,20 +56,18 @@ except Exception as e:
     print(f"⚠️ Leverage note: {e}")
 
 # ==============================================================================
-# 🧠 SECTION 3: PLUG-AND-PLAY STRATEGY LOGIC (ONLY CHANGE THIS FOR NEW STRATEGIES)
+# 🧠 SECTION 3: PLUG-AND-PLAY STRATEGY LOGIC (100% IDENTICAL TO BACKTESTER)
 # ==============================================================================
 def generate_strategy_signal(df):
     """
-    Evaluates ONLY the last fully CLOSED candle (df.iloc[-2]) so Live matches Backtest 100%.
-    Returns: dict {'side': 'long'/'short', 'sl': float, 'tp': float, 'candle_ts': int} or None
+    Evaluates the 40-candle swing window and checks for V7.5 Harmonic Sniper Entry.
     """
     df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-    # Window of 40 candles PRIOR to the just-closed candle (df.iloc[-2])
-    window = df.iloc[-LOOKBACK-2:-2]
-    signal_candle = df.iloc[-2]          # 🔒 100% Closed 15m Candle (No Intra-Candle Repainting!)
-    current_ema = float(signal_candle['EMA_200'])
-    candle_ts = int(signal_candle['Timestamp'])
+    window = df.iloc[-LOOKBACK-1:-1]
+    current_candle = df.iloc[-1]
+    current_ema = float(current_candle['EMA_200'])
+    candle_ts = int(current_candle['Timestamp'])
 
     swing_low = float(window['Low'].min())
     swing_high = float(window['High'].max())
@@ -79,14 +80,13 @@ def generate_strategy_signal(df):
 
     # --- BULLISH SETUP ---
     if swing_low_idx < swing_high_idx:
-        if float(signal_candle['Close']) < current_ema:
+        if float(current_candle['Close']) < current_ema:
             return None
 
         entry_level = swing_high - (price_range / DIVISOR)
         sl_level = swing_high - (price_range * SL_MULTIPLIER)
 
-        # Closed-candle rejection check + Intra-candle SL survival check
-        if float(signal_candle['Low']) <= entry_level and float(signal_candle['Close']) > entry_level and float(signal_candle['Low']) > sl_level:
+        if float(current_candle['Low']) <= entry_level and float(current_candle['Close']) > entry_level and float(current_candle['Low']) > sl_level:
             risk_per_coin = entry_level - sl_level
             if risk_per_coin > 0:
                 geo_target = (swing_high * entry_level) / swing_low
@@ -96,22 +96,22 @@ def generate_strategy_signal(df):
                     tp_level = entry_level + (risk_per_coin * applied_rr)
                     return {
                         'side': 'long',
-                        'ref_entry': float(entry_level),
+                        'sniper_entry': float(entry_level),
                         'sl': float(sl_level),
                         'tp': float(tp_level),
+                        'sniper_risk_dist': float(risk_per_coin),
                         'candle_ts': candle_ts
                     }
 
     # --- BEARISH SETUP ---
     elif swing_high_idx < swing_low_idx:
-        if float(signal_candle['Close']) > current_ema:
+        if float(current_candle['Close']) > current_ema:
             return None
 
         entry_level = swing_low + (price_range / DIVISOR)
         sl_level = swing_low + (price_range * SL_MULTIPLIER)
 
-        # Closed-candle rejection check + Intra-candle SL survival check
-        if float(signal_candle['High']) >= entry_level and float(signal_candle['Close']) < entry_level and float(signal_candle['High']) < sl_level:
+        if float(current_candle['High']) >= entry_level and float(current_candle['Close']) < entry_level and float(current_candle['High']) < sl_level:
             risk_per_coin = sl_level - entry_level
             if risk_per_coin > 0:
                 geo_target = (swing_low * entry_level) / swing_high
@@ -121,9 +121,10 @@ def generate_strategy_signal(df):
                     tp_level = entry_level - (risk_per_coin * applied_rr)
                     return {
                         'side': 'short',
-                        'ref_entry': float(entry_level),
+                        'sniper_entry': float(entry_level),
                         'sl': float(sl_level),
                         'tp': float(tp_level),
+                        'sniper_risk_dist': float(risk_per_coin),
                         'candle_ts': candle_ts
                     }
 
@@ -136,7 +137,6 @@ def get_raw_symbol():
     return SYMBOL.replace('/', '').replace(':', '')
 
 def get_active_position():
-    """Returns (pos_amt, entry_price) from Binance Futures"""
     positions = exchange.fetch_positions()
     raw_sym = get_raw_symbol()
     for p in positions:
@@ -147,7 +147,6 @@ def get_active_position():
     return 0.0, 0.0
 
 def fetch_all_open_orders_combined():
-    """Fetches both Basic and Conditional/Stop open orders"""
     all_orders = []
     seen_ids = set()
     for params in [{}, {'stop': True}, {'trigger': True}]:
@@ -167,7 +166,6 @@ def kill_all_active_orders():
     raw_sym = get_raw_symbol()
     killed = 0
 
-    # Layer 1: Direct Binance Raw Endpoints (Fastest Bulk Nuke)
     for raw_method in ['fapiPrivateDeleteAllOpenOrders', 'fapiPrivateDeleteAlgoOpenOrders']:
         if hasattr(exchange, raw_method):
             try:
@@ -175,19 +173,16 @@ def kill_all_active_orders():
             except Exception:
                 pass
 
-    # Layer 2: CCXT Unified Bulk Cancel (Normal + Stop + Trigger)
     for params in [{}, {'stop': True}, {'trigger': True}]:
         try:
             exchange.cancel_all_orders(SYMBOL, params=params)
         except Exception:
             pass
 
-    # Layer 3: Individual Order ID / AlgoID Sniper Verification
     remaining_orders = fetch_all_open_orders_combined()
     for o in remaining_orders:
         oid = o.get('id')
         algo_id = o.get('info', {}).get('algoId')
-        # Try standard cancel, stop cancel, and trigger cancel
         for p in [{}, {'stop': True}, {'trigger': True}]:
             try:
                 exchange.cancel_order(oid, SYMBOL, params=p)
@@ -195,7 +190,6 @@ def kill_all_active_orders():
                 break
             except Exception:
                 pass
-        # Try direct Algo order delete if algoId exists
         if algo_id and hasattr(exchange, 'fapiPrivateDeleteAlgoOrder'):
             try:
                 exchange.fapiPrivateDeleteAlgoOrder({'symbol': raw_sym, 'algoId': algo_id})
@@ -206,7 +200,6 @@ def kill_all_active_orders():
     return killed
 
 def cleanup_ghost_orders():
-    """🧹 Ensures 0 leftover conditional orders when position is flat"""
     try:
         pos_amt, _ = get_active_position()
         if pos_amt == 0.0:
@@ -221,13 +214,11 @@ def cleanup_ghost_orders():
         print(f"⚠️ Cleanup Warning: {e}")
 
 def place_sl_tp_orders(sl_price, tp_price, amount, side):
-    """Places MARK_PRICE triggered reduceOnly Stop-Loss and Take-Profit orders"""
     close_side = 'sell' if side == 'long' else 'buy'
     sl_rounded = float(exchange.price_to_precision(SYMBOL, sl_price))
     tp_rounded = float(exchange.price_to_precision(SYMBOL, tp_price))
     amt_rounded = float(exchange.amount_to_precision(SYMBOL, abs(amount)))
 
-    # 🛡️ workingType='MARK_PRICE' prevents fake Testnet orderbook spread stop-outs
     exchange.create_order(SYMBOL, 'STOP_MARKET', close_side, amt_rounded, None, params={
         'stopPrice': sl_rounded,
         'reduceOnly': True,
@@ -240,7 +231,6 @@ def place_sl_tp_orders(sl_price, tp_price, amount, side):
     })
 
 def update_trailing_sl(new_sl, tp_price, amount, side):
-    """🧲 Cancels old SL/TP and places updated Trailing SL + TP"""
     try:
         kill_all_active_orders()
         time.sleep(1)
@@ -251,11 +241,6 @@ def update_trailing_sl(new_sl, tp_price, amount, side):
         return False
 
 def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
-    """
-    🔄 Self-Healing State Recovery:
-    1. Rebuilds active_trade_state if container restarted mid-trade.
-    2. Places Emergency SL/TP if a naked position (no SL on exchange) is detected.
-    """
     side = 'long' if pos_amt > 0 else 'short'
     open_orders = fetch_all_open_orders_combined()
 
@@ -271,7 +256,6 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
             elif 'PROFIT' in otype or 'PROFIT' in raw_type:
                 tp_order_price = stop_p
 
-    # 🚨 NAKED POSITION SHIELD: If position has no SL on Binance, place one immediately!
     if sl_order_price is None:
         print("🚨 WARNING: Naked Position Detected (Missing SL)! Placing Protective SL/TP...")
         if active_trade_state is not None:
@@ -283,14 +267,11 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
         kill_all_active_orders()
         place_sl_tp_orders(sl_order_price, tp_order_price, pos_amt, side)
 
-    # 🔄 RECOVER MEMORY AFTER CONTAINER RESTART
     if active_trade_state is None:
         fallback_tp = tp_order_price if tp_order_price else (entry_price * 1.03 if side == 'long' else entry_price * 0.97)
-        # Estimate initial risk distance (at least MIN_SL_DISTANCE_PCT)
-        est_initial_sl = sl_order_price
+        est_risk_dist = abs(entry_price - sl_order_price)
         if (side == 'long' and sl_order_price >= entry_price) or (side == 'short' and sl_order_price <= entry_price):
-            # Already trailed to BE or profit!
-            est_initial_sl = entry_price * (1.0 - MIN_SL_DISTANCE_PCT * 2) if side == 'long' else entry_price * (1.0 + MIN_SL_DISTANCE_PCT * 2)
+            est_risk_dist = entry_price * 0.0025
             locked_lvl = 1
         else:
             locked_lvl = 0
@@ -298,7 +279,8 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
         active_trade_state = {
             'side': side,
             'entry': entry_price,
-            'initial_sl': est_initial_sl,
+            'initial_sl': sl_order_price,
+            'sniper_risk_dist': est_risk_dist,
             'tp': fallback_tp,
             'locked_level': locked_lvl
         }
@@ -306,27 +288,20 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
 
     return active_trade_state
 
-def calculate_safe_trade_size(usdt_balance, entry_price, sl_price):
-    """🛡️ Calculates Risk-Based Size with Minimum SL Distance & Max Notional Fee Capper"""
+def calculate_safe_trade_size(usdt_balance, sniper_entry, sl_price):
+    """Calculates position size with 10x Notional Capper"""
     risk_amount = usdt_balance * RISK_PERCENT
-    risk_per_coin = abs(entry_price - sl_price)
-    min_sl_dist = entry_price * MIN_SL_DISTANCE_PCT
-
-    # Reject micro-stops that would get wiped out by normal spread/fees
-    if risk_per_coin < min_sl_dist:
-        print(f"🛡️ Trade Skipped: SL distance ({risk_per_coin:.2f}) is smaller than safe minimum ({min_sl_dist:.2f}).")
+    risk_per_coin = abs(sniper_entry - sl_price)
+    if risk_per_coin <= 0:
         return 0.0, 0.0
 
     ideal_size = risk_amount / risk_per_coin
-    notional_value = ideal_size * entry_price
-
-    # Cap max position notional to 4x balance so fees never eat the account
-    max_safe_notional = min(usdt_balance * LEVERAGE * 0.85, usdt_balance * MAX_NOTIONAL_MULT)
+    notional_value = ideal_size * sniper_entry
+    max_safe_notional = min(usdt_balance * LEVERAGE * 0.90, usdt_balance * MAX_NOTIONAL_MULT)
 
     if notional_value > max_safe_notional:
-        capped_size = max_safe_notional / entry_price
-        print(f"⚠️ Size Capped for Fee Safety: {ideal_size:.4f} -> {capped_size:.4f}")
-        final_size = capped_size
+        final_size = max_safe_notional / sniper_entry
+        print(f"⚠️ Size Capped at {MAX_NOTIONAL_MULT}x Notional: {ideal_size:.4f} -> {final_size:.4f}")
     else:
         final_size = ideal_size
 
@@ -334,9 +309,10 @@ def calculate_safe_trade_size(usdt_balance, entry_price, sl_price):
     return float(exchange.amount_to_precision(SYMBOL, final_size)), actual_risk
 
 def run_master_engine():
-    print("=" * 70)
-    print(f"🚀 MASTER ENGINE V7.4 (BULLETPROOF CORE) | {SYMBOL} ({TIMEFRAME})")
-    print("=" * 70)
+    print("=" * 78)
+    print(f"🚀 MASTER ENGINE V7.5 | {SYMBOL} ({TIMEFRAME}) | CFG: ({RISK_PERCENT}, {PRICE_RANGE_FILTER}, {DIVISOR}, {SL_MULTIPLIER})")
+    print(f"🧲 TRAILING PROFILE   | BE: {BE_TRIGGER_RR}R -> +{BE_LOCK_RR}R | TRAIL: {TRAIL_TRIGGER_RR}R -> +{TRAIL_LOCK_RR}R")
+    print("=" * 78)
 
     cleanup_ghost_orders()
     active_trade_state = None
@@ -353,44 +329,40 @@ def run_master_engine():
                 active_trade_state = sync_and_protect_active_position(pos_amt, pos_entry, active_trade_state)
 
                 ticker = exchange.fetch_ticker(SYMBOL)
-                # Use Mark Price if available, fallback to last price
                 current_price = float(ticker.get('info', {}).get('markPrice') or ticker['last'])
                 entry = active_trade_state['entry']
-                initial_sl = active_trade_state['initial_sl']
-                risk_dist = abs(entry - initial_sl)
+                risk_dist = active_trade_state['sniper_risk_dist']
 
                 if risk_dist > 0:
                     if active_trade_state['side'] == 'long':
                         current_rr = (current_price - entry) / risk_dist
-                        if current_rr >= 4.0 and active_trade_state['locked_level'] < 2:
-                            new_sl = entry + (risk_dist * 2.0)
+                        if current_rr >= TRAIL_TRIGGER_RR and active_trade_state['locked_level'] < 2:
+                            new_sl = entry + (risk_dist * TRAIL_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'long'):
                                 active_trade_state['locked_level'] = 2
-                                print(f"🔒 [LONG] 1:4 Hit! Locked 1:2 Profit at {new_sl:.2f}")
-                                send_telegram(f"🔒 {SYMBOL} 1:4 Hit! Profit Locked at {new_sl:.2f}")
-                        elif current_rr >= 1.0 and active_trade_state['locked_level'] < 1:
-                            # Fee-Adjusted Break-Even (+0.12% above entry)
-                            new_sl = max(entry * (1.0 + FEE_BUFFER_PCT), entry + (risk_dist * 0.15))
+                                print(f"🔒 [LONG] {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R Profit at {new_sl:.2f}")
+                                send_telegram(f"🔒 {SYMBOL} {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R at {new_sl:.2f}")
+                        elif current_rr >= BE_TRIGGER_RR and active_trade_state['locked_level'] < 1:
+                            new_sl = entry + (risk_dist * BE_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'long'):
                                 active_trade_state['locked_level'] = 1
-                                print(f"🛡️ [LONG] 1:1 Hit! Fee-Safe Break-Even Secured at {new_sl:.2f}")
-                                send_telegram(f"🛡️ {SYMBOL} Fee-Safe Break-Even Secured at {new_sl:.2f}")
+                                print(f"🛡️ [LONG] {BE_TRIGGER_RR}R Hit! Locked +{BE_LOCK_RR}R Fee-Safe BE at {new_sl:.2f}")
+                                send_telegram(f"🛡️ {SYMBOL} Fee-Safe BE (+{BE_LOCK_RR}R) Secured at {new_sl:.2f}")
 
                     elif active_trade_state['side'] == 'short':
                         current_rr = (entry - current_price) / risk_dist
-                        if current_rr >= 4.0 and active_trade_state['locked_level'] < 2:
-                            new_sl = entry - (risk_dist * 2.0)
+                        if current_rr >= TRAIL_TRIGGER_RR and active_trade_state['locked_level'] < 2:
+                            new_sl = entry - (risk_dist * TRAIL_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'short'):
                                 active_trade_state['locked_level'] = 2
-                                print(f"🔒 [SHORT] 1:4 Hit! Locked 1:2 Profit at {new_sl:.2f}")
-                                send_telegram(f"🔒 {SYMBOL} 1:4 Hit! Profit Locked at {new_sl:.2f}")
-                        elif current_rr >= 1.0 and active_trade_state['locked_level'] < 1:
-                            # Fee-Adjusted Break-Even (-0.12% below entry)
-                            new_sl = min(entry * (1.0 - FEE_BUFFER_PCT), entry - (risk_dist * 0.15))
+                                print(f"🔒 [SHORT] {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R Profit at {new_sl:.2f}")
+                                send_telegram(f"🔒 {SYMBOL} {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R at {new_sl:.2f}")
+                        elif current_rr >= BE_TRIGGER_RR and active_trade_state['locked_level'] < 1:
+                            new_sl = entry - (risk_dist * BE_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'short'):
                                 active_trade_state['locked_level'] = 1
-                                print(f"🛡️ [SHORT] 1:1 Hit! Fee-Safe Break-Even Secured at {new_sl:.2f}")
-                                send_telegram(f"🛡️ {SYMBOL} Fee-Safe Break-Even Secured at {new_sl:.2f}")
+                                print(f"🛡️ [SHORT] {BE_TRIGGER_RR}R Hit! Locked +{BE_LOCK_RR}R Fee-Safe BE at {new_sl:.2f}")
+                                send_telegram(f"🛡️ {SYMBOL} Fee-Safe BE (+{BE_LOCK_RR}R) Secured at {new_sl:.2f}")
 
                 time.sleep(20)
                 continue
@@ -419,29 +391,17 @@ def run_master_engine():
                     time.sleep(30)
                     continue
 
-                # 🔒 2. Live Price & Real Execution RR Verification
                 ticker = exchange.fetch_ticker(SYMBOL)
                 live_price = float(ticker.get('info', {}).get('markPrice') or ticker['last'])
                 sl_price = signal['sl']
                 tp_price = signal['tp']
 
-                if signal['side'] == 'long':
-                    if live_price <= sl_price or live_price >= tp_price:
-                        last_traded_candle_ts = signal['candle_ts']
-                        continue
-                    live_rr = (tp_price - live_price) / (live_price - sl_price)
-                else:
-                    if live_price >= sl_price or live_price <= tp_price:
-                        last_traded_candle_ts = signal['candle_ts']
-                        continue
-                    live_rr = (live_price - tp_price) / (sl_price - live_price)
-
-                if live_rr < MIN_LIVE_EXECUTION_RR:
-                    print(f"⏸️ Signal Skipped: Live RR ({live_rr:.2f}) moved below minimum ({MIN_LIVE_EXECUTION_RR}).")
-                    last_traded_candle_ts = signal['candle_ts']
+                # Verify live price is inside valid SL/TP boundaries
+                if signal['side'] == 'long' and (live_price <= sl_price or live_price >= tp_price):
+                    continue
+                if signal['side'] == 'short' and (live_price >= sl_price or live_price <= tp_price):
                     continue
 
-                # 🔒 3. Balance & Safe Size Calculation
                 balance_data = exchange.fetch_balance()
                 usdt_balance = float(balance_data['USDT']['free'])
                 if usdt_balance < 20:
@@ -449,13 +409,12 @@ def run_master_engine():
                     time.sleep(300)
                     continue
 
-                trade_size, actual_risk = calculate_safe_trade_size(usdt_balance, live_price, sl_price)
+                trade_size, actual_risk = calculate_safe_trade_size(usdt_balance, signal['sniper_entry'], sl_price)
                 if trade_size <= 0:
-                    last_traded_candle_ts = signal['candle_ts']
                     time.sleep(30)
                     continue
 
-                # 🔒 4. Clean Slate -> Execute Entry -> Place MARK_PRICE SL/TP
+                # 🔒 2. Clean Slate -> Execute Market Order -> Place MARK_PRICE SL/TP
                 kill_all_active_orders()
 
                 if signal['side'] == 'long':
@@ -468,8 +427,10 @@ def run_master_engine():
 
                 active_trade_state = {
                     'side': signal['side'],
-                    'entry': actual_entry,
+                    'entry': signal['sniper_entry'],
+                    'actual_fill': actual_entry,
                     'initial_sl': sl_price,
+                    'sniper_risk_dist': signal['sniper_risk_dist'],
                     'tp': tp_price,
                     'locked_level': 0
                 }
@@ -477,11 +438,10 @@ def run_master_engine():
 
                 emoji = "🚀" if signal['side'] == 'long' else "📉"
                 msg = (
-                    f"{emoji} {SYMBOL} {signal['side'].upper()} (V7.4 MASTER)\n"
-                    f"Entry: {actual_entry:.2f}\n"
+                    f"{emoji} {SYMBOL} {signal['side'].upper()} (V7.5 CHAMPION)\n"
+                    f"Fill: {actual_entry:.2f} (Ref: {signal['sniper_entry']:.2f})\n"
                     f"Target: {tp_price:.2f}\n"
                     f"SL (Mark): {sl_price:.2f}\n"
-                    f"Live RR: 1:{live_rr:.2f}\n"
                     f"Size: {trade_size} | Risk: ${actual_risk:.2f}"
                 )
                 print(msg)
