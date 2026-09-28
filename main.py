@@ -241,25 +241,53 @@ def update_trailing_sl(new_sl, tp_price, amount, side):
         return False
 
 def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
+    """
+    🔄 Accurately detects Binance Algo/Conditional SL & TP orders and preserves Trailed SLs.
+    """
     side = 'long' if pos_amt > 0 else 'short'
     open_orders = fetch_all_open_orders_combined()
 
     sl_order_price = None
     tp_order_price = None
+    trigger_prices = []
+
     for o in open_orders:
-        otype = str(o.get('type', '')).upper()
-        raw_type = str(o.get('info', {}).get('type', '')).upper()
-        stop_p = float(o.get('stopPrice') or o.get('triggerPrice') or o.get('info', {}).get('stopPrice') or 0)
+        info = o.get('info', {})
+        combined_type = f"{o.get('type', '')} {info.get('type', '')} {info.get('orderType', '')} {info.get('origType', '')}".upper()
+        stop_p = float(
+            o.get('stopPrice') or
+            o.get('triggerPrice') or
+            info.get('stopPrice') or
+            info.get('triggerPrice') or
+            info.get('activatePrice') or
+            o.get('price') or 0
+        )
         if stop_p > 0:
-            if 'STOP' in otype or 'STOP' in raw_type:
+            trigger_prices.append(stop_p)
+            if 'STOP' in combined_type:
                 sl_order_price = stop_p
-            elif 'PROFIT' in otype or 'PROFIT' in raw_type:
+            elif 'PROFIT' in combined_type:
                 tp_order_price = stop_p
 
+    # Geometry Fallback: If Binance Algo orders didn't label 'STOP'/'PROFIT', infer from trigger prices
+    if sl_order_price is None and len(trigger_prices) >= 2:
+        if side == 'long':
+            sl_order_price = min(trigger_prices)
+            tp_order_price = max(trigger_prices)
+        else:
+            sl_order_price = max(trigger_prices)
+            tp_order_price = min(trigger_prices)
+    elif sl_order_price is None and len(trigger_prices) == 1 and active_trade_state is not None:
+        # Check if the single order is closer to current_sl than tp
+        p = trigger_prices[0]
+        if abs(p - active_trade_state['current_sl']) <= abs(p - active_trade_state['tp']):
+            sl_order_price = p
+
+    # 🚨 Place Protective SL/TP ONLY if SL is genuinely missing on Binance
     if sl_order_price is None:
         print("🚨 WARNING: Naked Position Detected (Missing SL)! Placing Protective SL/TP...")
         if active_trade_state is not None:
-            sl_order_price = active_trade_state['initial_sl']
+            sl_order_price = active_trade_state['current_sl']  # Preserves Trailed SL!
             tp_order_price = active_trade_state['tp']
         else:
             sl_order_price = entry_price * (1.0 - EMERGENCY_SL_PCT) if side == 'long' else entry_price * (1.0 + EMERGENCY_SL_PCT)
@@ -267,6 +295,7 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
         kill_all_active_orders()
         place_sl_tp_orders(sl_order_price, tp_order_price, pos_amt, side)
 
+    # 🔄 Recover Memory After Container Restart
     if active_trade_state is None:
         fallback_tp = tp_order_price if tp_order_price else (entry_price * 1.03 if side == 'long' else entry_price * 0.97)
         est_risk_dist = abs(entry_price - sl_order_price)
@@ -280,6 +309,7 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
             'side': side,
             'entry': entry_price,
             'initial_sl': sl_order_price,
+            'current_sl': sl_order_price,
             'sniper_risk_dist': est_risk_dist,
             'tp': fallback_tp,
             'locked_level': locked_lvl
@@ -340,12 +370,14 @@ def run_master_engine():
                             new_sl = entry + (risk_dist * TRAIL_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'long'):
                                 active_trade_state['locked_level'] = 2
+                                active_trade_state['current_sl'] = new_sl
                                 print(f"🔒 [LONG] {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R Profit at {new_sl:.2f}")
                                 send_telegram(f"🔒 {SYMBOL} {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R at {new_sl:.2f}")
                         elif current_rr >= BE_TRIGGER_RR and active_trade_state['locked_level'] < 1:
                             new_sl = entry + (risk_dist * BE_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'long'):
                                 active_trade_state['locked_level'] = 1
+                                active_trade_state['current_sl'] = new_sl
                                 print(f"🛡️ [LONG] {BE_TRIGGER_RR}R Hit! Locked +{BE_LOCK_RR}R Fee-Safe BE at {new_sl:.2f}")
                                 send_telegram(f"🛡️ {SYMBOL} Fee-Safe BE (+{BE_LOCK_RR}R) Secured at {new_sl:.2f}")
 
@@ -355,12 +387,14 @@ def run_master_engine():
                             new_sl = entry - (risk_dist * TRAIL_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'short'):
                                 active_trade_state['locked_level'] = 2
+                                active_trade_state['current_sl'] = new_sl
                                 print(f"🔒 [SHORT] {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R Profit at {new_sl:.2f}")
                                 send_telegram(f"🔒 {SYMBOL} {TRAIL_TRIGGER_RR}R Hit! Locked +{TRAIL_LOCK_RR}R at {new_sl:.2f}")
                         elif current_rr >= BE_TRIGGER_RR and active_trade_state['locked_level'] < 1:
                             new_sl = entry - (risk_dist * BE_LOCK_RR)
                             if update_trailing_sl(new_sl, active_trade_state['tp'], pos_amt, 'short'):
                                 active_trade_state['locked_level'] = 1
+                                active_trade_state['current_sl'] = new_sl
                                 print(f"🛡️ [SHORT] {BE_TRIGGER_RR}R Hit! Locked +{BE_LOCK_RR}R Fee-Safe BE at {new_sl:.2f}")
                                 send_telegram(f"🛡️ {SYMBOL} Fee-Safe BE (+{BE_LOCK_RR}R) Secured at {new_sl:.2f}")
 
@@ -430,6 +464,7 @@ def run_master_engine():
                     'entry': signal['sniper_entry'],
                     'actual_fill': actual_entry,
                     'initial_sl': sl_price,
+                    'current_sl': sl_price,
                     'sniper_risk_dist': signal['sniper_risk_dist'],
                     'tp': tp_price,
                     'locked_level': 0
