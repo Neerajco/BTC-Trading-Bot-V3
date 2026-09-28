@@ -1,26 +1,36 @@
 import ccxt
 import time
 import os
+import numpy as np
 import pandas as pd
 from notifier import send_telegram
 
 # ==============================================================================
-# ⚙️ SECTION 1: GLOBAL & STRATEGY CONFIGURATION (CHAMPION: 0.03, 700, 1.3, 0.95)
+# ⚙️ SECTION 1: V7.6 HYBRID CONFIGURATION (EMA 200 + 15m SUPERTREND FUSION)
 # ==============================================================================
 SYMBOL = 'BTC/USDT'              # Asset ('BTC/USDT' or 'PAXG/USDT')
 TIMEFRAME = '15m'                # Execution Timeframe
-RISK_PERCENT = 0.03              # 🏆 3% Risk per trade (0.03)
 LEVERAGE = 20                    # Exchange Leverage
 USE_DEMO_TRADING = True          # True = Binance Demo/Testnet, False = Real Live Account
 
+# 🏆 SELECT V7.6 HYBRID MODE:
+# 'UNION_2TIER'   -> B2/B1 Champion ($7,577.44 Wealth | $2,144 Bank Cash | -20.0% DD)
+# 'STRICT_ST21_5' -> C2 Low-DD Sniper ($5,744.36 Wealth | $1,506 Bank Cash | -17.6% DD)
+HYBRID_MODE = 'UNION_2TIER'
+
+# 🎯 DYNAMIC CONFLUENCE RISK SETTINGS
+TIER1_RISK = 0.020               # 2.0% Risk when 1 Indicator agrees (Set 0.015 for B1 -19.1% DD)
+TIER2_CONFLUENCE_RISK = 0.040    # 4.0% Risk when BOTH EMA 200 + 15m SuperTrend agree (A+ Setup)
+STRICT_MODE_RISK = 0.035         # 3.5% Risk if using 'STRICT_ST21_5' mode
+
 # 🛡️ OPERATIONAL & FEE GUARDS (MATCHES BACKTESTER 100%)
-MAX_NOTIONAL_MULT = 10.0         # Max Position Size = 10x of Balance (Safe inside 20x Leverage)
+MAX_NOTIONAL_MULT = 12.0         # Max Position Size = 12x of Balance (Safe inside 20x Leverage)
 EMERGENCY_SL_PCT = 0.0100        # 1% Emergency SL if a naked position is ever detected
 
-# 🎯 CHAMPION STRATEGY PARAMETERS: (0.03, 700, 1.3, 0.95)
-PRICE_RANGE_FILTER = 700         # 🏆 700 Minimum Swing Range Filter for BTC
-DIVISOR = 1.3                    # 🏆 76.92% Pullback Entry
-SL_MULTIPLIER = 0.95             # 🏆 95.0% Wide Stop-Loss (18.08% Cushion)
+# 📐 HARMONIC V7.6 GEOMETRY
+PRICE_RANGE_FILTER = 700         # 700 Minimum Swing Range Filter for BTC
+DIVISOR = 1.3                    # 76.92% Golden Pullback Entry
+SL_MULTIPLIER = 0.95             # 95.0% Wide Stop-Loss (18.08% Cushion)
 MIN_RR = 2.0                     # Minimum Theoretical Reward-to-Risk
 MAX_RR = 10.0                    # Maximum Reward-to-Risk Cap
 LOOKBACK = 40                    # 40-Candle Swing Lookback Window
@@ -56,17 +66,58 @@ except Exception as e:
     print(f"⚠️ Leverage note: {e}")
 
 # ==============================================================================
-# 🧠 SECTION 3: PLUG-AND-PLAY STRATEGY LOGIC (100% IDENTICAL TO BACKTESTER)
+# 🧠 SECTION 3: V7.6 HYBRID STRATEGY LOGIC (EMA 200 + 15m SUPERTREND)
 # ==============================================================================
+def compute_supertrend_series(df, period=21, multiplier=3.0):
+    """Computes 15m SuperTrend direction (1 = Bullish Green, -1 = Bearish Red)"""
+    highs = df['High'].values
+    lows = df['Low'].values
+    closes = df['Close'].values
+    n = len(closes)
+
+    tr = np.zeros(n)
+    tr[0] = highs[0] - lows[0]
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+
+    atr = pd.Series(tr).ewm(alpha=1.0/period, adjust=False).mean().values
+    hl2 = (highs + lows) / 2.0
+    basic_ub = hl2 + (multiplier * atr)
+    basic_lb = hl2 - (multiplier * atr)
+
+    final_ub = np.zeros(n)
+    final_lb = np.zeros(n)
+    st_dir = np.ones(n, dtype=np.int8)
+
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+
+    for i in range(1, n):
+        final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or closes[i-1] > final_ub[i-1]) else final_ub[i-1]
+        final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or closes[i-1] < final_lb[i-1]) else final_lb[i-1]
+
+        if st_dir[i-1] == 1:
+            st_dir[i] = -1 if closes[i] < final_lb[i] else 1
+        else:
+            st_dir[i] = 1 if closes[i] > final_ub[i] else -1
+
+    return st_dir
+
 def generate_strategy_signal(df):
     """
-    Evaluates the 40-candle swing window and checks for V7.5 Harmonic Sniper Entry.
+    Evaluates V7.6 Hybrid Confluence (EMA 200 + 15m SuperTrend) and assigns Dynamic Risk.
     """
     df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    st_mult = 5.0 if HYBRID_MODE == 'STRICT_ST21_5' else 3.0
+    df['ST_Dir'] = compute_supertrend_series(df, period=21, multiplier=st_mult)
 
     window = df.iloc[-LOOKBACK-1:-1]
     current_candle = df.iloc[-1]
+    current_close = float(current_candle['Close'])
+    current_low = float(current_candle['Low'])
+    current_high = float(current_candle['High'])
     current_ema = float(current_candle['EMA_200'])
+    current_st = int(current_candle['ST_Dir'])
     candle_ts = int(current_candle['Timestamp'])
 
     swing_low = float(window['Low'].min())
@@ -80,13 +131,29 @@ def generate_strategy_signal(df):
 
     # --- BULLISH SETUP ---
     if swing_low_idx < swing_high_idx:
-        if float(current_candle['Close']) < current_ema:
-            return None
+        ema_ok = (current_close >= current_ema)
+        st_ok = (current_st == 1)
+
+        if HYBRID_MODE == 'STRICT_ST21_5':
+            if not (ema_ok and st_ok):
+                return None
+            signal_risk = STRICT_MODE_RISK
+            tier_label = "STRICT A+ (EMA200 + ST 21,5)"
+        else: # UNION_2TIER (B1 / B2 Champion)
+            if not (ema_ok or st_ok):
+                return None
+            if ema_ok and st_ok:
+                signal_risk = TIER2_CONFLUENCE_RISK
+                tier_label = f"🔥 TIER-2 A+ CONFLUENCE ({int(signal_risk*100)}% Risk)"
+            else:
+                signal_risk = TIER1_RISK
+                active_ind = "EMA200" if ema_ok else "ST(21,3)"
+                tier_label = f"🛡️ TIER-1 {active_ind} ({signal_risk*100:.1f}% Risk)"
 
         entry_level = swing_high - (price_range / DIVISOR)
         sl_level = swing_high - (price_range * SL_MULTIPLIER)
 
-        if float(current_candle['Low']) <= entry_level and float(current_candle['Close']) > entry_level and float(current_candle['Low']) > sl_level:
+        if current_low <= entry_level and current_close > entry_level and current_low > sl_level:
             risk_per_coin = entry_level - sl_level
             if risk_per_coin > 0:
                 geo_target = (swing_high * entry_level) / swing_low
@@ -100,18 +167,36 @@ def generate_strategy_signal(df):
                         'sl': float(sl_level),
                         'tp': float(tp_level),
                         'sniper_risk_dist': float(risk_per_coin),
+                        'risk_pct': float(signal_risk),
+                        'tier_label': tier_label,
                         'candle_ts': candle_ts
                     }
 
     # --- BEARISH SETUP ---
     elif swing_high_idx < swing_low_idx:
-        if float(current_candle['Close']) > current_ema:
-            return None
+        ema_ok = (current_close <= current_ema)
+        st_ok = (current_st == -1)
+
+        if HYBRID_MODE == 'STRICT_ST21_5':
+            if not (ema_ok and st_ok):
+                return None
+            signal_risk = STRICT_MODE_RISK
+            tier_label = "STRICT A+ (EMA200 + ST 21,5)"
+        else: # UNION_2TIER (B1 / B2 Champion)
+            if not (ema_ok or st_ok):
+                return None
+            if ema_ok and st_ok:
+                signal_risk = TIER2_CONFLUENCE_RISK
+                tier_label = f"🔥 TIER-2 A+ CONFLUENCE ({int(signal_risk*100)}% Risk)"
+            else:
+                signal_risk = TIER1_RISK
+                active_ind = "EMA200" if ema_ok else "ST(21,3)"
+                tier_label = f"🛡️ TIER-1 {active_ind} ({signal_risk*100:.1f}% Risk)"
 
         entry_level = swing_low + (price_range / DIVISOR)
         sl_level = swing_low + (price_range * SL_MULTIPLIER)
 
-        if float(current_candle['High']) >= entry_level and float(current_candle['Close']) < entry_level and float(current_candle['High']) < sl_level:
+        if current_high >= entry_level and current_close < entry_level and current_high < sl_level:
             risk_per_coin = sl_level - entry_level
             if risk_per_coin > 0:
                 geo_target = (swing_low * entry_level) / swing_high
@@ -125,6 +210,8 @@ def generate_strategy_signal(df):
                         'sl': float(sl_level),
                         'tp': float(tp_level),
                         'sniper_risk_dist': float(risk_per_coin),
+                        'risk_pct': float(signal_risk),
+                        'tier_label': tier_label,
                         'candle_ts': candle_ts
                     }
 
@@ -241,9 +328,7 @@ def update_trailing_sl(new_sl, tp_price, amount, side):
         return False
 
 def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
-    """
-    🔄 Accurately detects Binance Algo/Conditional SL & TP orders and preserves Trailed SLs.
-    """
+    """Accurately detects Binance Algo/Conditional SL & TP orders and preserves Trailed SLs."""
     side = 'long' if pos_amt > 0 else 'short'
     open_orders = fetch_all_open_orders_combined()
 
@@ -269,7 +354,6 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
             elif 'PROFIT' in combined_type:
                 tp_order_price = stop_p
 
-    # Geometry Fallback: If Binance Algo orders didn't label 'STOP'/'PROFIT', infer from trigger prices
     if sl_order_price is None and len(trigger_prices) >= 2:
         if side == 'long':
             sl_order_price = min(trigger_prices)
@@ -278,16 +362,14 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
             sl_order_price = max(trigger_prices)
             tp_order_price = min(trigger_prices)
     elif sl_order_price is None and len(trigger_prices) == 1 and active_trade_state is not None:
-        # Check if the single order is closer to current_sl than tp
         p = trigger_prices[0]
         if abs(p - active_trade_state['current_sl']) <= abs(p - active_trade_state['tp']):
             sl_order_price = p
 
-    # 🚨 Place Protective SL/TP ONLY if SL is genuinely missing on Binance
     if sl_order_price is None:
         print("🚨 WARNING: Naked Position Detected (Missing SL)! Placing Protective SL/TP...")
         if active_trade_state is not None:
-            sl_order_price = active_trade_state['current_sl']  # Preserves Trailed SL!
+            sl_order_price = active_trade_state['current_sl']
             tp_order_price = active_trade_state['tp']
         else:
             sl_order_price = entry_price * (1.0 - EMERGENCY_SL_PCT) if side == 'long' else entry_price * (1.0 + EMERGENCY_SL_PCT)
@@ -295,7 +377,6 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
         kill_all_active_orders()
         place_sl_tp_orders(sl_order_price, tp_order_price, pos_amt, side)
 
-    # 🔄 Recover Memory After Container Restart
     if active_trade_state is None:
         fallback_tp = tp_order_price if tp_order_price else (entry_price * 1.03 if side == 'long' else entry_price * 0.97)
         est_risk_dist = abs(entry_price - sl_order_price)
@@ -318,9 +399,9 @@ def sync_and_protect_active_position(pos_amt, entry_price, active_trade_state):
 
     return active_trade_state
 
-def calculate_safe_trade_size(usdt_balance, sniper_entry, sl_price):
-    """Calculates position size with 10x Notional Capper"""
-    risk_amount = usdt_balance * RISK_PERCENT
+def calculate_safe_trade_size(usdt_balance, sniper_entry, sl_price, dynamic_risk_pct):
+    """Calculates position size using Dynamic Confluence Risk & 12x Notional Capper"""
+    risk_amount = usdt_balance * dynamic_risk_pct
     risk_per_coin = abs(sniper_entry - sl_price)
     if risk_per_coin <= 0:
         return 0.0, 0.0
@@ -339,10 +420,11 @@ def calculate_safe_trade_size(usdt_balance, sniper_entry, sl_price):
     return float(exchange.amount_to_precision(SYMBOL, final_size)), actual_risk
 
 def run_master_engine():
-    print("=" * 78)
-    print(f"🚀 MASTER ENGINE V7.5 | {SYMBOL} ({TIMEFRAME}) | CFG: ({RISK_PERCENT}, {PRICE_RANGE_FILTER}, {DIVISOR}, {SL_MULTIPLIER})")
-    print(f"🧲 TRAILING PROFILE   | BE: {BE_TRIGGER_RR}R -> +{BE_LOCK_RR}R | TRAIL: {TRAIL_TRIGGER_RR}R -> +{TRAIL_LOCK_RR}R")
-    print("=" * 78)
+    print("=" * 80)
+    print(f"🚀 MASTER ENGINE V7.6 HYBRID | {SYMBOL} ({TIMEFRAME}) | MODE: {HYBRID_MODE}")
+    print(f"⚡ CONFLUENCE SIZING         | TIER-1: {TIER1_RISK*100:.1f}% | TIER-2 (EMA+ST): {TIER2_CONFLUENCE_RISK*100:.1f}%")
+    print(f"🧲 TRAILING PROFILE          | BE: {BE_TRIGGER_RR}R -> +{BE_LOCK_RR}R | TRAIL: {TRAIL_TRIGGER_RR}R -> +{TRAIL_LOCK_RR}R")
+    print("=" * 80)
 
     cleanup_ghost_orders()
     active_trade_state = None
@@ -409,7 +491,7 @@ def run_master_engine():
                 active_trade_state = None
 
             cleanup_ghost_orders()
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Scanning Market {SYMBOL}...")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Scanning Market {SYMBOL} (V7.6 Hybrid)...")
 
             bars = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=250)
             if not bars or len(bars) < 210:
@@ -430,7 +512,6 @@ def run_master_engine():
                 sl_price = signal['sl']
                 tp_price = signal['tp']
 
-                # Verify live price is inside valid SL/TP boundaries
                 if signal['side'] == 'long' and (live_price <= sl_price or live_price >= tp_price):
                     continue
                 if signal['side'] == 'short' and (live_price >= sl_price or live_price <= tp_price):
@@ -443,7 +524,9 @@ def run_master_engine():
                     time.sleep(300)
                     continue
 
-                trade_size, actual_risk = calculate_safe_trade_size(usdt_balance, signal['sniper_entry'], sl_price)
+                trade_size, actual_risk = calculate_safe_trade_size(
+                    usdt_balance, signal['sniper_entry'], sl_price, signal['risk_pct']
+                )
                 if trade_size <= 0:
                     time.sleep(30)
                     continue
@@ -473,7 +556,8 @@ def run_master_engine():
 
                 emoji = "🚀" if signal['side'] == 'long' else "📉"
                 msg = (
-                    f"{emoji} {SYMBOL} {signal['side'].upper()} (V7.5 CHAMPION)\n"
+                    f"{emoji} {SYMBOL} {signal['side'].upper()} (V7.6 HYBRID)\n"
+                    f"Setup: {signal['tier_label']}\n"
                     f"Fill: {actual_entry:.2f} (Ref: {signal['sniper_entry']:.2f})\n"
                     f"Target: {tp_price:.2f}\n"
                     f"SL (Mark): {sl_price:.2f}\n"
